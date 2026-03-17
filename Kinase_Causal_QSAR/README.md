@@ -43,6 +43,45 @@ python scripts/01_extract_human_kinase_ki.py --config /path/to/config.yaml
 - Extraction SQL is saved exactly as executed.
 - Logs capture schema decisions and filters.
 
+
+### Diagnostics / debugging zero-row extractions
+Use Script-01 diagnostics to identify which filter stage collapses row counts:
+
+```bash
+python scripts/01_extract_human_kinase_ki.py
+```
+
+The script logs and prints counts for staged filters:
+- **Stage A**: base Ki activity constraints only (`assay_type=B`, `confidence_score=9`, `Ki`, `=`, `nM`, `standard_value>0`)
+- **Stage B**: Stage A + single-protein target type
+- **Stage C**: Stage B + human organism (`Homo sapiens`)
+- **Stage D**: independent count of kinase-classified targets via protein-classification tables
+- **Stage E**: Stage C + kinase classification join restriction
+- **Stage F**: Stage E + variant/mutant exclusion
+
+Artifacts:
+- Diagnostics JSON: `reports/01_extraction_diagnostics.json`
+- Stage preview CSVs (for non-empty stages): `data/raw/debug_stage_A.csv`, `..._B.csv`, etc.
+
+To isolate likely causes of zero rows:
+
+Disable kinase restriction:
+```bash
+python scripts/01_extract_human_kinase_ki.py --disable_kinase_classification
+```
+
+Disable variant exclusion:
+```bash
+python scripts/01_extract_human_kinase_ki.py --disable_variant_filter
+```
+
+Disable both (base extraction behavior without kinase/variant constraints):
+```bash
+python scripts/01_extract_human_kinase_ki.py --disable_kinase_classification --disable_variant_filter
+```
+
+Interpretation tip: compare where counts drop sharply (for example C->E indicates kinase classification is too strict; E->F indicates variant filtering is too aggressive).
+
 ---
 
 ## Script-02: Curate and aggregate kinase Ki records

@@ -9,6 +9,7 @@ variant annotations).
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import sqlite3
 import sys
@@ -28,6 +29,8 @@ class AppConfig:
     chembl_sqlite_path: Path
     output_csv_path: Path
     output_sql_path: Path
+    diagnostics_json_path: Path
+    debug_stage_dir: Path
     logs_dir: Path
 
     @staticmethod
@@ -41,6 +44,10 @@ class AppConfig:
             raw.get("output_csv_path", "data/raw/chembl_human_kinase_ki_raw.csv")
         )
         output_sql = Path(raw.get("output_sql_path", "sql/kinase_ki_extraction.sql"))
+        diagnostics_json = Path(
+            raw.get("diagnostics_json_path", "reports/01_extraction_diagnostics.json")
+        )
+        debug_stage_dir = Path(raw.get("debug_stage_dir", "data/raw"))
         logs_dir = Path(raw.get("logs_dir", "logs"))
 
         if not db_path.is_absolute():
@@ -49,6 +56,10 @@ class AppConfig:
             output_csv = project_root / output_csv
         if not output_sql.is_absolute():
             output_sql = project_root / output_sql
+        if not diagnostics_json.is_absolute():
+            diagnostics_json = project_root / diagnostics_json
+        if not debug_stage_dir.is_absolute():
+            debug_stage_dir = project_root / debug_stage_dir
         if not logs_dir.is_absolute():
             logs_dir = project_root / logs_dir
 
@@ -56,6 +67,8 @@ class AppConfig:
             chembl_sqlite_path=db_path,
             output_csv_path=output_csv,
             output_sql_path=output_sql,
+            diagnostics_json_path=diagnostics_json,
+            debug_stage_dir=debug_stage_dir,
             logs_dir=logs_dir,
         )
 
@@ -72,6 +85,16 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("config.yaml"),
         help="Path to YAML config file (default: config.yaml)",
+    )
+    parser.add_argument(
+        "--disable_variant_filter",
+        action="store_true",
+        help="Disable variant/mutant exclusion in final extraction query.",
+    )
+    parser.add_argument(
+        "--disable_kinase_classification",
+        action="store_true",
+        help="Disable kinase-classification restriction in final extraction query.",
     )
     return parser.parse_args()
 
@@ -129,6 +152,18 @@ def get_table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
     return {row[1] for row in cur.fetchall()}
 
 
+def get_table_info(conn: sqlite3.Connection, table_name: str) -> list[sqlite3.Row]:
+    if not table_exists(conn, table_name):
+        return []
+    original_factory = conn.row_factory
+    conn.row_factory = sqlite3.Row
+    try:
+        cur = conn.execute(f"PRAGMA table_info({table_name})")
+        return cur.fetchall()
+    finally:
+        conn.row_factory = original_factory
+
+
 def choose_first_existing(columns: set[str], candidates: list[str]) -> Optional[str]:
     for col in candidates:
         if col in columns:
@@ -136,7 +171,166 @@ def choose_first_existing(columns: set[str], candidates: list[str]) -> Optional[
     return None
 
 
-def build_query(conn: sqlite3.Connection, logger: logging.Logger) -> str:
+def base_filter_sql() -> str:
+    return """
+ass.assay_type = 'B'
+  AND ass.confidence_score = 9
+  AND a.standard_type = 'Ki'
+  AND a.standard_relation = '='
+  AND a.standard_units = 'nM'
+  AND a.standard_value > 0
+""".strip()
+
+
+def build_variant_filter(conn: sqlite3.Connection, logger: logging.Logger) -> tuple[str, dict]:
+    metadata: dict[str, object] = {
+        "applied": False,
+        "source": None,
+        "property_types_used": [],
+        "warning": None,
+    }
+    act_cols = get_table_columns(conn, "activities")
+    if "activity_properties" in act_cols:
+        metadata.update({"applied": True, "source": "activities.activity_properties"})
+        return (
+            """
+  AND (
+      a.activity_properties IS NULL
+      OR LOWER(a.activity_properties) NOT LIKE '%variant%'
+         AND LOWER(a.activity_properties) NOT LIKE '%mutant%'
+  )""",
+            metadata,
+        )
+
+    if not table_exists(conn, "activity_properties"):
+        metadata["warning"] = "No activity_properties table/column available."
+        logger.warning("No activity_properties table/column available; variant exclusion skipped.")
+        return "", metadata
+
+    ap_cols = get_table_columns(conn, "activity_properties")
+    type_col = choose_first_existing(ap_cols, ["type", "property_type"])
+    value_col = choose_first_existing(ap_cols, ["value", "property_value"])
+    if not type_col or "activity_id" not in ap_cols or "activity_id" not in act_cols:
+        metadata["warning"] = "Missing expected activity_properties fields."
+        logger.warning("activity_properties exists but missing expected fields; variant exclusion skipped.")
+        return "", metadata
+
+    type_query = f"SELECT DISTINCT {type_col} FROM activity_properties WHERE {type_col} IS NOT NULL"
+    property_types = [row[0] for row in conn.execute(type_query).fetchall()]
+    matched_types = [
+        t for t in property_types if isinstance(t, str) and ("variant" in t.lower() or "mutant" in t.lower())
+    ]
+    logger.info("Distinct property types in activity_properties.%s: %s", type_col, property_types)
+
+    if not matched_types:
+        metadata["warning"] = "No clear variant/mutant property types detected; exclusion skipped."
+        logger.warning(
+            "No clear variant/mutant property types found in activity_properties; skipping variant exclusion."
+        )
+        return "", metadata
+
+    escaped = [t.replace("'", "''") for t in matched_types]
+    in_clause = ", ".join(f"'{val}'" for val in escaped)
+    value_predicate = ""
+    if value_col:
+        value_predicate = f" OR LOWER(ap.{value_col}) LIKE '%variant%' OR LOWER(ap.{value_col}) LIKE '%mutant%'"
+
+    metadata.update(
+        {
+            "applied": True,
+            "source": "activity_properties",
+            "property_types_used": matched_types,
+        }
+    )
+    logger.info(
+        "Applying variant exclusion via activity_properties using type values: %s",
+        ", ".join(matched_types),
+    )
+    return (
+        f"""
+  AND a.activity_id NOT IN (
+      SELECT ap.activity_id
+      FROM activity_properties ap
+      WHERE ap.{type_col} IN ({in_clause})
+         {value_predicate}
+  )""",
+        metadata,
+    )
+
+
+def build_kinase_filter(conn: sqlite3.Connection, logger: logging.Logger) -> tuple[str, dict]:
+    metadata: dict[str, object] = {
+        "applied": False,
+        "columns_used": [],
+        "warning": None,
+    }
+    if not (
+        table_exists(conn, "target_components")
+        and table_exists(conn, "component_class")
+        and table_exists(conn, "protein_classification")
+    ):
+        metadata["warning"] = "Protein classification path tables are incomplete."
+        logger.warning("Protein classification tables not fully available; kinase restriction skipped.")
+        return "", metadata
+
+    pc_cols = get_table_columns(conn, "protein_classification")
+    pc_info = get_table_info(conn, "protein_classification")
+    text_cols = {row["name"] for row in pc_info if "CHAR" in str(row["type"]).upper() or "TEXT" in str(row["type"]).upper()}
+    preferred_pc_cols = [
+        "pref_name",
+        "short_name",
+        "protein_class_desc",
+        "class_level1",
+        "class_level2",
+        "class_level3",
+        "class_level4",
+        "class_level5",
+        "class_level6",
+        "class_level7",
+        "class_level8",
+        "l1",
+        "l2",
+        "l3",
+        "l4",
+        "l5",
+        "l6",
+        "l7",
+        "l8",
+    ]
+    columns = [c for c in preferred_pc_cols if c in pc_cols and (c in text_cols or not text_cols)]
+    if not columns:
+        columns = [
+            c for c in sorted(pc_cols) if ("class" in c.lower() or "level" in c.lower() or "name" in c.lower()) and (c in text_cols or not text_cols)
+        ]
+    if not columns:
+        metadata["warning"] = "No suitable text columns found in protein_classification."
+        logger.warning("No suitable protein_classification columns found for kinase matching.")
+        return "", metadata
+
+    kinase_text_expr = " || ' ' ||\n          ".join(f"COALESCE(pc.{col}, '')" for col in columns)
+    metadata.update({"applied": True, "columns_used": columns})
+    logger.info("Kinase classification using protein_classification columns: %s", ", ".join(columns))
+    return (
+        """
+  AND td.tid IN (
+      SELECT DISTINCT tc.tid
+      FROM target_components tc
+      JOIN component_class cc ON tc.component_id = cc.component_id
+      JOIN protein_classification pc ON cc.protein_class_id = pc.protein_class_id
+      WHERE LOWER(
+          {kinase_text_expr}
+      ) LIKE '%kinase%'
+  )""".format(kinase_text_expr=kinase_text_expr),
+        metadata,
+    )
+
+
+def build_query(
+    conn: sqlite3.Connection,
+    logger: logging.Logger,
+    disable_variant_filter: bool,
+    disable_kinase_classification: bool,
+) -> tuple[str, dict, str, str]:
     """Build SQL dynamically to tolerate minor schema differences across ChEMBL versions."""
 
     # Validate presence of required core tables.
@@ -221,120 +415,14 @@ def build_query(conn: sqlite3.Connection, logger: logging.Logger) -> str:
             ]
         )
 
-    # Variant / mutant exclusion when possible.
-    variant_filter_sql = ""
-    if "activity_properties" in get_table_columns(conn, "activities"):
-        # In some releases, this is a column in activities (rare). Keep defensive support.
-        variant_filter_sql = (
-            "\n  AND (a.activity_properties IS NULL OR a.activity_properties = '')"
-        )
-        logger.info("Applying variant filter using activities.activity_properties.")
-    elif table_exists(conn, "activity_properties"):
-        ap_cols = get_table_columns(conn, "activity_properties")
-        # We look for common keys indicating mutation/variant and exclude those activities.
-        type_col = choose_first_existing(ap_cols, ["type", "property_type"])
-        value_col = choose_first_existing(ap_cols, ["value", "property_value"])
-        if type_col and value_col and "activity_id" in ap_cols and "activity_id" in act_cols:
-            variant_filter_sql = f"""
-  AND a.activity_id NOT IN (
-      SELECT ap.activity_id
-      FROM activity_properties ap
-      WHERE LOWER(ap.{type_col}) LIKE '%variant%'
-         OR LOWER(ap.{type_col}) LIKE '%mutant%'
-         OR LOWER(ap.{value_col}) LIKE '%variant%'
-         OR LOWER(ap.{value_col}) LIKE '%mutant%'
-  )"""
-            logger.info(
-                "Applying variant/mutant exclusion using activity_properties (%s, %s).",
-                type_col,
-                value_col,
-            )
-        else:
-            logger.warning(
-                "activity_properties table exists but expected fields not found; "
-                "variant exclusion skipped."
-            )
-    else:
-        logger.warning(
-            "No variant annotation table/field detected; continuing without explicit variant exclusion."
-        )
-
-    # Kinase restriction via protein classification tables when available.
-    # Common ChEMBL setup includes:
-    # target_components -> component_class -> protein_classification
-    # We enforce kinase via classification text matching to keep compatibility.
-    kinase_filter_sql = ""
-    if (
-        table_exists(conn, "target_components")
-        and table_exists(conn, "component_class")
-        and table_exists(conn, "protein_classification")
-    ):
-        pc_cols = get_table_columns(conn, "protein_classification")
-        kinase_text_cols: list[str] = []
-
-        # Prefer explicit known text columns first.
-        preferred_pc_cols = [
-            "pref_name",
-            "short_name",
-            "protein_class_desc",
-            "class_level1",
-            "class_level2",
-            "class_level3",
-            "class_level4",
-            "class_level5",
-            "class_level6",
-            "class_level7",
-            "class_level8",
-            "l1",
-            "l2",
-            "l3",
-            "l4",
-            "l5",
-            "l6",
-            "l7",
-            "l8",
-        ]
-        for col in preferred_pc_cols:
-            if col in pc_cols:
-                kinase_text_cols.append(col)
-
-        # Add any additional level-like columns to maximize cross-version compatibility.
-        for col in sorted(pc_cols):
-            lower = col.lower()
-            if col in kinase_text_cols:
-                continue
-            if lower.startswith("class_level") or lower.startswith("level"):
-                kinase_text_cols.append(col)
-
-        if not kinase_text_cols:
-            logger.warning(
-                "protein_classification exists but no text level columns found; "
-                "kinase restriction skipped."
-            )
-        else:
-            kinase_text_expr = " || ' ' ||\n          ".join(
-                f"COALESCE(pc.{col}, '')" for col in kinase_text_cols
-            )
-            kinase_filter_sql = """
-  AND td.tid IN (
-      SELECT DISTINCT tc.tid
-      FROM target_components tc
-      JOIN component_class cc ON tc.component_id = cc.component_id
-      JOIN protein_classification pc ON cc.protein_class_id = pc.protein_class_id
-      WHERE LOWER(
-          {kinase_text_expr}
-      ) LIKE '%kinase%'
-  )""".format(kinase_text_expr=kinase_text_expr)
-            logger.info(
-                "Using protein classification tables to restrict targets to kinases "
-                "(columns: %s).",
-                ", ".join(kinase_text_cols),
-            )
-    else:
-        logger.warning(
-            "Protein classification tables not fully available; kinase restriction skipped. "
-            "Adapt SQL for your ChEMBL schema if alternative classification tables exist."
-        )
+    variant_filter_sql, variant_meta = build_variant_filter(conn, logger)
+    kinase_filter_sql, kinase_meta = build_kinase_filter(conn, logger)
+    if disable_variant_filter:
+        logger.warning("Variant filter disabled via --disable_variant_filter.")
+        variant_filter_sql = ""
+    if disable_kinase_classification:
+        logger.warning("Kinase filter disabled via --disable_kinase_classification.")
+        kinase_filter_sql = ""
 
     select_optional_sql = ",\n    ".join(select_optional)
     joins_optional_sql = "\n".join(joins_optional)
@@ -365,25 +453,107 @@ LEFT JOIN compound_structures cs ON md.molregno = cs.molregno
 {joins_optional_sql}
 WHERE td.organism = 'Homo sapiens'
   AND LOWER(tt.parent_type) = 'single protein'
-  AND ass.assay_type = 'B'
-  AND ass.confidence_score = 9
-  AND a.standard_type = 'Ki'
-  AND a.standard_relation = '='
-  AND a.standard_units = 'nM'
-  AND a.standard_value > 0
+  AND {base_filter_sql()}
 {kinase_filter_sql}
 {variant_filter_sql}
 ;""".strip()
 
-    return query
+    return query, {"variant": variant_meta, "kinase": kinase_meta}, kinase_filter_sql, variant_filter_sql
 
 
 def ensure_output_paths(cfg: AppConfig) -> None:
     cfg.output_csv_path.parent.mkdir(parents=True, exist_ok=True)
     cfg.output_sql_path.parent.mkdir(parents=True, exist_ok=True)
+    cfg.diagnostics_json_path.parent.mkdir(parents=True, exist_ok=True)
+    cfg.debug_stage_dir.mkdir(parents=True, exist_ok=True)
 
 
-def run_extraction(cfg: AppConfig, logger: logging.Logger) -> pd.DataFrame:
+def run_stage_diagnostics(
+    conn: sqlite3.Connection,
+    cfg: AppConfig,
+    logger: logging.Logger,
+    kinase_filter_sql: str,
+    variant_filter_sql: str,
+) -> dict:
+    stages: dict[str, dict[str, object]] = {}
+    preview_limit = 25
+
+    stage_queries = {
+        "A": f"""SELECT a.activity_id, a.assay_id, a.standard_value, a.standard_units
+FROM activities a
+JOIN assays ass ON a.assay_id = ass.assay_id
+WHERE {base_filter_sql()}""",
+        "B": f"""SELECT a.activity_id, td.tid, td.pref_name, td.organism
+FROM activities a
+JOIN assays ass ON a.assay_id = ass.assay_id
+JOIN target_dictionary td ON ass.tid = td.tid
+JOIN target_type tt ON td.target_type = tt.target_type
+WHERE {base_filter_sql()}
+  AND LOWER(tt.parent_type) = 'single protein'""",
+        "C": f"""SELECT a.activity_id, td.tid, td.pref_name, td.organism
+FROM activities a
+JOIN assays ass ON a.assay_id = ass.assay_id
+JOIN target_dictionary td ON ass.tid = td.tid
+JOIN target_type tt ON td.target_type = tt.target_type
+WHERE {base_filter_sql()}
+  AND LOWER(tt.parent_type) = 'single protein'
+  AND td.organism = 'Homo sapiens'""",
+        "D": """SELECT DISTINCT tc.tid
+FROM target_components tc
+JOIN component_class cc ON tc.component_id = cc.component_id
+JOIN protein_classification pc ON cc.protein_class_id = pc.protein_class_id
+WHERE 1=1""",
+        "E": f"""SELECT a.activity_id, td.tid, td.pref_name
+FROM activities a
+JOIN assays ass ON a.assay_id = ass.assay_id
+JOIN target_dictionary td ON ass.tid = td.tid
+JOIN target_type tt ON td.target_type = tt.target_type
+WHERE {base_filter_sql()}
+  AND LOWER(tt.parent_type) = 'single protein'
+  AND td.organism = 'Homo sapiens'
+  {kinase_filter_sql}""",
+        "F": f"""SELECT a.activity_id, td.tid, td.pref_name
+FROM activities a
+JOIN assays ass ON a.assay_id = ass.assay_id
+JOIN target_dictionary td ON ass.tid = td.tid
+JOIN target_type tt ON td.target_type = tt.target_type
+WHERE {base_filter_sql()}
+  AND LOWER(tt.parent_type) = 'single protein'
+  AND td.organism = 'Homo sapiens'
+  {kinase_filter_sql}
+  {variant_filter_sql}""",
+    }
+
+    # Stage D needs kinase expression; if unavailable, return 0 with warning.
+    if not kinase_filter_sql:
+        stage_queries["D"] = "SELECT CAST(NULL AS INTEGER) AS tid WHERE 1 = 0"
+        logger.warning("Stage D skipped because kinase classification SQL is unavailable.")
+    else:
+        stage_queries["D"] += kinase_filter_sql.replace("AND td.tid IN", "AND tc.tid IN")
+
+    for stage, sql in stage_queries.items():
+        df = pd.read_sql_query(sql, conn)
+        count = len(df)
+        logger.info("Stage %s row count: %d", stage, count)
+        print(f"Stage {stage} row count: {count}")
+        preview_file = None
+        if count > 0:
+            preview_file = cfg.debug_stage_dir / f"debug_stage_{stage}.csv"
+            df.head(preview_limit).to_csv(preview_file, index=False)
+            logger.info("Saved Stage %s preview to %s", stage, preview_file)
+        stages[stage] = {"count": count, "preview_csv": str(preview_file) if preview_file else None}
+
+    cfg.diagnostics_json_path.write_text(json.dumps(stages, indent=2), encoding="utf-8")
+    logger.info("Saved diagnostics JSON to %s", cfg.diagnostics_json_path)
+    return stages
+
+
+def run_extraction(
+    cfg: AppConfig,
+    logger: logging.Logger,
+    disable_variant_filter: bool,
+    disable_kinase_classification: bool,
+) -> pd.DataFrame:
     if not cfg.chembl_sqlite_path.exists():
         raise FileNotFoundError(
             f"ChEMBL SQLite file not found: {cfg.chembl_sqlite_path}"
@@ -393,7 +563,20 @@ def run_extraction(cfg: AppConfig, logger: logging.Logger) -> pd.DataFrame:
     conn = sqlite3.connect(cfg.chembl_sqlite_path)
 
     try:
-        query = build_query(conn, logger)
+        query, filter_meta, kinase_filter_sql, variant_filter_sql = build_query(
+            conn,
+            logger,
+            disable_variant_filter=disable_variant_filter,
+            disable_kinase_classification=disable_kinase_classification,
+        )
+        run_stage_diagnostics(
+            conn,
+            cfg,
+            logger,
+            kinase_filter_sql=kinase_filter_sql,
+            variant_filter_sql=variant_filter_sql,
+        )
+        logger.info("Filter metadata: %s", json.dumps(filter_meta))
         cfg.output_sql_path.write_text(query + "\n", encoding="utf-8")
         logger.info("Saved extraction SQL to: %s", cfg.output_sql_path)
 
@@ -435,7 +618,12 @@ def main() -> int:
         logger.info("Log file: %s", log_file)
         ensure_output_paths(cfg)
 
-        df = run_extraction(cfg, logger)
+        df = run_extraction(
+            cfg,
+            logger,
+            disable_variant_filter=args.disable_variant_filter,
+            disable_kinase_classification=args.disable_kinase_classification,
+        )
         df.to_csv(cfg.output_csv_path, index=False)
         logger.info("Saved extracted dataset to: %s", cfg.output_csv_path)
 
