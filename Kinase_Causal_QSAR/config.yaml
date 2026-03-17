@@ -1,0 +1,8 @@
+# Example configuration for ChEMBL kinase Ki extraction.
+# Update chembl_sqlite_path to your local ChEMBL SQLite file.
+chembl_sqlite_path: /path/to/chembl_34/chembl_34_sqlite/chembl_34.db
+
+# Optional outputs (defaults shown)
+output_csv_path: data/raw/chembl_human_kinase_ki_raw.csv
+output_sql_path: sql/kinase_ki_extraction.sql
+logs_dir: logs
