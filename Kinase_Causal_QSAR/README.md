@@ -19,68 +19,71 @@ Edit `config.yaml` and set `chembl_sqlite_path` to your local SQLite file. Scrip
 
 ---
 
-## Script-01: Extract high-confidence human kinase Ki data
+## Script-01: Diagnostic extraction for human kinase bioactivity data
 
 ### Purpose
-Extract high-confidence human single-protein kinase Ki records from a local ChEMBL SQLite database.
+Run a staged diagnostic extraction to determine exactly where all-kinase row loss happens (endpoint filters, confidence-score filters, kinase classification, or join behavior), while also exporting both broad and strict datasets.
 
 ### Run
 From `Kinase_Causal_QSAR/`:
 ```bash
-python scripts/01_extract_human_kinase_ki.py
+python scripts/01_extract_human_kinase_ki.py --mode broad
+```
+or
+```bash
+python scripts/01_extract_human_kinase_ki.py --mode strict
 ```
 Optional custom config:
 ```bash
-python scripts/01_extract_human_kinase_ki.py --config /path/to/config.yaml
+python scripts/01_extract_human_kinase_ki.py --config /path/to/config.yaml --mode broad
 ```
+
+### Broad vs strict mode
+- `--mode broad`
+  - Confidence: `confidence_score IN (8,9)`
+  - Endpoints: `standard_type IN ('Ki','IC50','Kd')`
+- `--mode strict`
+  - Confidence: `confidence_score = 9`
+  - Endpoints: `standard_type = 'Ki'`
+
+Both modes are always executed internally, and if non-empty both datasets are saved. `--mode` only controls which query is written to `output_sql_path` and which dataset is written to the legacy `output_csv_path`.
+
+### Diagnostic stages (A-J)
+Script-01 logs row counts and unique TID counts for:
+- **A**: `assay_type='B'`, `standard_relation='='`, `standard_units='nM'`, `standard_value>0`
+- **B**: A + single-protein target type
+- **C**: B + `organism='Homo sapiens'`
+- **D**: C + `confidence_score IN (8,9)`
+- **E**: C + `confidence_score = 9`
+- **F**: D + `standard_type IN ('Ki','IC50','Kd')`
+- **G**: E + `standard_type='Ki'`
+- **H**: independent kinase-target extraction (flexible classification matching across available text/classification columns)
+- **I**: F joined to kinase targets
+- **J**: G joined to kinase targets
 
 ### Outputs
-- Raw extracted data: `data/raw/chembl_human_kinase_ki_raw.csv`
-- SQL used for extraction: `sql/kinase_ki_extraction.sql`
+- Broad dataset (if non-empty): `data/raw/chembl_human_kinase_broad_raw.csv`
+- Strict dataset (if non-empty): `data/raw/chembl_human_kinase_strict_raw.csv`
+- Legacy selected-mode dataset (if non-empty): `data/raw/chembl_human_kinase_ki_raw.csv`
+- Diagnostics JSON: `reports/01_extraction_diagnostics.json`
+- Stage previews for non-empty stages: `data/raw/debug_stage_A.csv` ... `data/raw/debug_stage_J.csv`
+- Kinase target list: `data/raw/debug_kinase_targets.csv`
+- SQL used for selected mode: `sql/kinase_ki_extraction.sql`
 - Run logs: `logs/extract_human_kinase_ki_YYYYMMDD_HHMMSS.log`
 
-### Reproducibility notes
-- Extraction SQL is saved exactly as executed.
-- Logs capture schema decisions and filters.
+### How to interpret stage counts
+- Large drop **C -> D/E**: confidence filtering is the bottleneck.
+- Large drop **D -> F** or **E -> G**: endpoint restriction is the bottleneck.
+- Large drop **F -> I** or **G -> J**: kinase classification or kinase-join logic is the bottleneck.
+- Stage **H** near zero: likely kinase-target identification issue.
 
+### Why zero rows can occur
+- Endpoint restriction too narrow (e.g., Ki-only misses IC50/Kd records).
+- Confidence restriction too narrow (e.g., score 9-only excludes score 8 records).
+- Kinase classification misses valid kinase targets because classification fields vary by ChEMBL build.
+- Join mismatch between filtered activities and kinase target IDs.
 
-### Diagnostics / debugging zero-row extractions
-Use Script-01 diagnostics to identify which filter stage collapses row counts:
-
-```bash
-python scripts/01_extract_human_kinase_ki.py
-```
-
-The script logs and prints counts for staged filters:
-- **Stage A**: base Ki activity constraints only (`assay_type=B`, `confidence_score=9`, `Ki`, `=`, `nM`, `standard_value>0`)
-- **Stage B**: Stage A + single-protein target type
-- **Stage C**: Stage B + human organism (`Homo sapiens`)
-- **Stage D**: independent count of kinase-classified targets via protein-classification tables
-- **Stage E**: Stage C + kinase classification join restriction
-- **Stage F**: Stage E + variant/mutant exclusion
-
-Artifacts:
-- Diagnostics JSON: `reports/01_extraction_diagnostics.json`
-- Stage preview CSVs (for non-empty stages): `data/raw/debug_stage_A.csv`, `..._B.csv`, etc.
-
-To isolate likely causes of zero rows:
-
-Disable kinase restriction:
-```bash
-python scripts/01_extract_human_kinase_ki.py --disable_kinase_classification
-```
-
-Disable variant exclusion:
-```bash
-python scripts/01_extract_human_kinase_ki.py --disable_variant_filter
-```
-
-Disable both (base extraction behavior without kinase/variant constraints):
-```bash
-python scripts/01_extract_human_kinase_ki.py --disable_kinase_classification --disable_variant_filter
-```
-
-Interpretation tip: compare where counts drop sharply (for example C->E indicates kinase classification is too strict; E->F indicates variant filtering is too aggressive).
+Note: variant/mutant exclusion is intentionally disabled at this diagnostic stage and should only be reintroduced after base kinase extraction is confirmed non-empty.
 
 ---
 
