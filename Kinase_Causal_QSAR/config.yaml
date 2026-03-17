@@ -4,7 +4,12 @@ chembl_sqlite_path: /path/to/chembl_34/chembl_34_sqlite/chembl_34.db
 
 # Optional outputs (defaults shown)
 output_csv_path: data/raw/chembl_human_kinase_ki_raw.csv
+output_broad_csv_path: data/raw/chembl_human_kinase_broad_raw.csv
+output_strict_csv_path: data/raw/chembl_human_kinase_strict_raw.csv
 output_sql_path: sql/kinase_ki_extraction.sql
+diagnostics_json_path: reports/01_extraction_diagnostics.json
+debug_stage_dir: data/raw
+kinase_targets_csv_path: data/raw/debug_kinase_targets.csv
 logs_dir: logs
 
 # Global figure palette (Nature-style manuscript consistency across scripts)
@@ -27,4 +32,3 @@ script_02:
   logs_dir: logs
   configs_used_dir: configs_used
   min_heavy_atoms: 3
-
