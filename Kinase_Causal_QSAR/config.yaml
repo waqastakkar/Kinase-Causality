@@ -6,3 +6,25 @@ chembl_sqlite_path: /path/to/chembl_34/chembl_34_sqlite/chembl_34.db
 output_csv_path: data/raw/chembl_human_kinase_ki_raw.csv
 output_sql_path: sql/kinase_ki_extraction.sql
 logs_dir: logs
+
+# Global figure palette (Nature-style manuscript consistency across scripts)
+figure_palette:
+  blue: "#386CB0"
+  orange: "#F39C12"
+  green: "#2CA25F"
+  red: "#E74C3C"
+  purple: "#756BB1"
+  gray: "#7F8C8D"
+
+# Script-02 curation and aggregation settings
+script_02:
+  input_csv_path: data/raw/chembl_human_kinase_ki_raw.csv
+  curated_long_csv_path: data/interim/chembl_human_kinase_ki_curated_long.csv
+  duplicate_summary_csv_path: data/interim/chembl_human_kinase_ki_duplicate_summary.csv
+  kinase_counts_csv_path: data/interim/kinase_record_counts.csv
+  intermediate_standardized_csv_path: data/interim/chembl_human_kinase_ki_standardized_records.csv
+  curation_report_json_path: reports/02_curation_report.json
+  logs_dir: logs
+  configs_used_dir: configs_used
+  min_heavy_atoms: 3
+
