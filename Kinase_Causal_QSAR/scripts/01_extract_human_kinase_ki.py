@@ -269,27 +269,67 @@ def build_query(conn: sqlite3.Connection, logger: logging.Logger) -> str:
         and table_exists(conn, "component_class")
         and table_exists(conn, "protein_classification")
     ):
-        kinase_filter_sql = """
+        pc_cols = get_table_columns(conn, "protein_classification")
+        kinase_text_cols: list[str] = []
+
+        # Prefer explicit known text columns first.
+        preferred_pc_cols = [
+            "pref_name",
+            "short_name",
+            "protein_class_desc",
+            "class_level1",
+            "class_level2",
+            "class_level3",
+            "class_level4",
+            "class_level5",
+            "class_level6",
+            "class_level7",
+            "class_level8",
+            "l1",
+            "l2",
+            "l3",
+            "l4",
+            "l5",
+            "l6",
+            "l7",
+            "l8",
+        ]
+        for col in preferred_pc_cols:
+            if col in pc_cols:
+                kinase_text_cols.append(col)
+
+        # Add any additional level-like columns to maximize cross-version compatibility.
+        for col in sorted(pc_cols):
+            lower = col.lower()
+            if col in kinase_text_cols:
+                continue
+            if lower.startswith("class_level") or lower.startswith("level"):
+                kinase_text_cols.append(col)
+
+        if not kinase_text_cols:
+            logger.warning(
+                "protein_classification exists but no text level columns found; "
+                "kinase restriction skipped."
+            )
+        else:
+            kinase_text_expr = " || ' ' ||\n          ".join(
+                f"COALESCE(pc.{col}, '')" for col in kinase_text_cols
+            )
+            kinase_filter_sql = """
   AND td.tid IN (
       SELECT DISTINCT tc.tid
       FROM target_components tc
       JOIN component_class cc ON tc.component_id = cc.component_id
       JOIN protein_classification pc ON cc.protein_class_id = pc.protein_class_id
       WHERE LOWER(
-          COALESCE(pc.pref_name, '') || ' ' ||
-          COALESCE(pc.class_level1, '') || ' ' ||
-          COALESCE(pc.class_level2, '') || ' ' ||
-          COALESCE(pc.class_level3, '') || ' ' ||
-          COALESCE(pc.class_level4, '') || ' ' ||
-          COALESCE(pc.class_level5, '') || ' ' ||
-          COALESCE(pc.class_level6, '') || ' ' ||
-          COALESCE(pc.class_level7, '') || ' ' ||
-          COALESCE(pc.class_level8, '')
+          {kinase_text_expr}
       ) LIKE '%kinase%'
-  )"""
-        logger.info(
-            "Using protein classification tables to restrict targets to kinases."
-        )
+  )""".format(kinase_text_expr=kinase_text_expr)
+            logger.info(
+                "Using protein classification tables to restrict targets to kinases "
+                "(columns: %s).",
+                ", ".join(kinase_text_cols),
+            )
     else:
         logger.warning(
             "Protein classification tables not fully available; kinase restriction skipped. "
