@@ -54,3 +54,43 @@ script_03:
   drop_singleton_compounds: true
   save_dense_matrix_copy: true
 
+
+
+# Script-04 environment annotation settings
+script_04:
+  input_long_path: data/processed/chembl_human_kinase_panel_long.csv
+  input_matrix_path: data/processed/chembl_human_kinase_pki_matrix.csv
+  input_mask_path: data/processed/chembl_human_kinase_observation_mask.csv
+  input_kinase_summary_path: data/processed/kinase_panel_summary.csv
+  supplemental_metadata_path:
+
+  output_annotated_long_path: data/processed/chembl_human_kinase_panel_annotated_long.csv
+  output_compound_env_path: data/processed/compound_environment_annotations.csv
+  output_kinase_env_path: data/processed/kinase_environment_annotations.csv
+  output_source_env_path: data/processed/source_environment_annotations.csv
+  output_pair_env_path: data/processed/pair_environment_annotations.csv
+  output_activity_cliff_path: data/processed/activity_cliff_annotations.csv
+  output_env_report_path: reports/04_environment_annotation_report.json
+
+  compute_murcko_scaffolds: true
+  compute_generic_murcko_scaffolds: true
+  compute_rdkit_descriptors: true
+  compute_scaffold_frequency_bins: true
+
+  annotate_kinase_family_from_chembl: true
+  kinase_family_fallback_to_name_matching: true
+
+  compute_source_environments: true
+  compute_document_frequency_bins: true
+
+  compute_pairwise_activity_cliffs: true
+  activity_cliff_similarity_metric: tanimoto_morgan
+  morgan_radius: 2
+  morgan_nbits: 2048
+  activity_cliff_similarity_threshold: 0.80
+  activity_cliff_delta_pki_threshold: 1.0
+
+  save_similarity_diagnostics: true
+  max_pairs_for_cliff_analysis_per_kinase: 200000
+
+  save_config_snapshot: true
