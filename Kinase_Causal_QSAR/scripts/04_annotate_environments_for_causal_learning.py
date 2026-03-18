@@ -110,6 +110,19 @@ OPTIONAL_LONG_ALIASES: dict[str, tuple[str, ...]] = {
 DEFAULT_SOURCE_PLACEHOLDER = "UNAVAILABLE"
 
 
+def count_heteroatoms(mol: Chem.Mol) -> int:
+    """Return the RDKit heteroatom count across supported RDKit versions."""
+
+    heteroatom_fn = getattr(Lipinski, "NumHeteroatoms", None)
+    if heteroatom_fn is None:
+        heteroatom_fn = getattr(Lipinski, "Heteroatoms", None)
+    if heteroatom_fn is None:  # pragma: no cover - defensive compatibility guard
+        raise AttributeError(
+            "RDKit Lipinski module is missing both NumHeteroatoms and Heteroatoms."
+        )
+    return int(heteroatom_fn(mol))
+
+
 @dataclass
 class AppConfig:
     input_long_path: Path
@@ -669,7 +682,7 @@ def annotate_compounds(df: pd.DataFrame, cfg: AppConfig) -> tuple[pd.DataFrame, 
                     "rotatable_bond_count": int(Lipinski.NumRotatableBonds(mol)),
                     "formal_charge": int(Chem.GetFormalCharge(mol)),
                     "fraction_csp3": float(rdMolDescriptors.CalcFractionCSP3(mol)),
-                    "heteroatom_count": int(Lipinski.Heteroatoms(mol)),
+                    "heteroatom_count": count_heteroatoms(mol),
                     "num_valence_electrons": float(Descriptors.NumValenceElectrons(mol)),
                 }
             )
