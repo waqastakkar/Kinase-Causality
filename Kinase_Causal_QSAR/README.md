@@ -145,6 +145,11 @@ Script-03 is the bridge between cleaned continuous `pKi` regression data from Sc
 - Default expected path: `data/interim/chembl_human_kinase_ki_curated_regression_long.csv`
 
 Script-03 validates that the configured Script-02 output contains the expected aggregated compound, kinase, and `pKi` columns before building any panel outputs.
+For compound identity, Script-03 accepts either:
+- an explicit `compound_id` column, or
+- `standardized_smiles`, which it will reuse as the canonical compound key when `compound_id` is absent.
+
+Script-03 also accepts the current Script-02 aggregated activity column names such as `median_pKi` and `median_ki_nM`, normalizing them internally to the expected `pKi` / `Ki_nM` fields.
 
 ### Run
 From `Kinase_Causal_QSAR/`:
