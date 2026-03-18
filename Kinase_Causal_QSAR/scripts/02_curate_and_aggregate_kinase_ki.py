@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Curate and aggregate Script-01 ChEMBL human kinase Ki output.
+"""Curate and aggregate Script-01 ChEMBL human kinase output.
 
-This script is a strict continuation of Script-01 and expects
-`data/raw/chembl_human_kinase_ki_raw.csv` as the primary input.
+This script is a strict continuation of Script-01 and consumes only the
+CSV configured at `script_02.input_csv_path`.
 """
 
 from __future__ import annotations
@@ -32,6 +32,15 @@ except ImportError as exc:  # pragma: no cover - runtime dependency guard
 
 SCRIPT_NAME = "02_curate_and_aggregate_kinase_ki"
 RANDOM_SEED = 2025
+DEFAULT_FIGURE_PALETTE = {
+    "blue": "#386CB0",
+    "orange": "#F39C12",
+    "green": "#2CA25F",
+    "red": "#E74C3C",
+    "purple": "#756BB1",
+    "gray": "#7F8C8D",
+}
+VALID_ENDPOINT_HANDLING = {"error", "filter"}
 
 
 @dataclass
@@ -46,7 +55,10 @@ class AppConfig:
     configs_used_dir: Path
     logs_dir: Path
     intermediate_standardized_csv_path: Path
+    endpoint_summary_csv_path: Path
     figure_palette: dict[str, str]
+    endpoint_handling: str = "error"
+    allowed_standard_types: tuple[str, ...] = ("Ki",)
     min_heavy_atoms: int = 3
 
     @staticmethod
@@ -57,23 +69,27 @@ class AppConfig:
             path = Path(path_like)
             return path if path.is_absolute() else project_root / path
 
-        palette = raw.get(
-            "figure_palette",
-            {
-                "blue": "#386CB0",
-                "orange": "#F39C12",
-                "green": "#2CA25F",
-                "red": "#E74C3C",
-                "purple": "#756BB1",
-                "gray": "#7F8C8D",
-            },
-        )
+        endpoint_handling = str(script_cfg.get("endpoint_handling", "error")).strip().lower()
+        if endpoint_handling not in VALID_ENDPOINT_HANDLING:
+            raise ValueError(
+                "script_02.endpoint_handling must be one of "
+                f"{sorted(VALID_ENDPOINT_HANDLING)}; got {endpoint_handling!r}."
+            )
+
+        configured_types = script_cfg.get("allowed_standard_types", ["Ki"])
+        if isinstance(configured_types, str):
+            configured_types = [configured_types]
+        if not isinstance(configured_types, list) or not configured_types:
+            raise ValueError(
+                "script_02.allowed_standard_types must be a non-empty list or string."
+            )
+        allowed_standard_types = tuple(str(value).strip() for value in configured_types if str(value).strip())
+        if not allowed_standard_types:
+            raise ValueError("script_02.allowed_standard_types cannot be empty.")
 
         return AppConfig(
             input_csv_path=resolve(
-                script_cfg.get(
-                    "input_csv_path", "data/raw/chembl_human_kinase_ki_raw.csv"
-                )
+                script_cfg.get("input_csv_path", "data/raw/chembl_human_kinase_ki_raw.csv")
             ),
             curated_long_csv_path=resolve(
                 script_cfg.get(
@@ -88,14 +104,10 @@ class AppConfig:
                 )
             ),
             kinase_counts_csv_path=resolve(
-                script_cfg.get(
-                    "kinase_counts_csv_path", "data/interim/kinase_record_counts.csv"
-                )
+                script_cfg.get("kinase_counts_csv_path", "data/interim/kinase_record_counts.csv")
             ),
             curation_report_json_path=resolve(
-                script_cfg.get(
-                    "curation_report_json_path", "reports/02_curation_report.json"
-                )
+                script_cfg.get("curation_report_json_path", "reports/02_curation_report.json")
             ),
             configs_used_dir=resolve(script_cfg.get("configs_used_dir", "configs_used")),
             logs_dir=resolve(script_cfg.get("logs_dir", "logs")),
@@ -105,7 +117,15 @@ class AppConfig:
                     "data/interim/chembl_human_kinase_ki_standardized_records.csv",
                 )
             ),
-            figure_palette=palette,
+            endpoint_summary_csv_path=resolve(
+                script_cfg.get(
+                    "endpoint_summary_csv_path",
+                    "reports/02_endpoint_summary.csv",
+                )
+            ),
+            figure_palette=raw.get("figure_palette", DEFAULT_FIGURE_PALETTE),
+            endpoint_handling=endpoint_handling,
+            allowed_standard_types=allowed_standard_types,
             min_heavy_atoms=int(script_cfg.get("min_heavy_atoms", 3)),
         )
 
@@ -113,7 +133,7 @@ class AppConfig:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Curate and aggregate Script-01 human kinase Ki output to a deterministic "
+            "Curate and aggregate Script-01 human kinase output to a deterministic "
             "publication-ready interim dataset."
         )
     )
@@ -149,6 +169,7 @@ def ensure_output_dirs(cfg: AppConfig) -> None:
         cfg.kinase_counts_csv_path,
         cfg.curation_report_json_path,
         cfg.intermediate_standardized_csv_path,
+        cfg.endpoint_summary_csv_path,
     ]:
         path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -196,15 +217,16 @@ def save_config_snapshot(
             "duplicate_summary_csv_path": str(cfg.duplicate_summary_csv_path),
             "kinase_counts_csv_path": str(cfg.kinase_counts_csv_path),
             "curation_report_json_path": str(cfg.curation_report_json_path),
-            "intermediate_standardized_csv_path": str(
-                cfg.intermediate_standardized_csv_path
-            ),
+            "intermediate_standardized_csv_path": str(cfg.intermediate_standardized_csv_path),
+            "endpoint_summary_csv_path": str(cfg.endpoint_summary_csv_path),
             "logs_dir": str(cfg.logs_dir),
             "configs_used_dir": str(cfg.configs_used_dir),
         },
         "parameters": {
             "min_heavy_atoms": cfg.min_heavy_atoms,
             "figure_palette": cfg.figure_palette,
+            "endpoint_handling": cfg.endpoint_handling,
+            "allowed_standard_types": list(cfg.allowed_standard_types),
         },
         "source_config": loaded_raw_config,
     }
@@ -238,6 +260,101 @@ def validate_required_columns(df: pd.DataFrame) -> None:
         raise ValueError(f"Missing required Script-01 columns: {missing}")
 
 
+def build_endpoint_summary(df: pd.DataFrame) -> pd.DataFrame:
+    summary = (
+        df.assign(
+            standard_type=df["standard_type"].fillna("<missing>").astype(str),
+            standard_units=df["standard_units"].fillna("<missing>").astype(str),
+        )
+        .groupby(["standard_type", "standard_units"], dropna=False)
+        .size()
+        .reset_index(name="n_records")
+        .sort_values(by=["n_records", "standard_type", "standard_units"], ascending=[False, True, True], kind="mergesort")
+    )
+    return summary
+
+
+def validate_and_prepare_endpoints(
+    df: pd.DataFrame,
+    cfg: AppConfig,
+    logger: logging.Logger,
+) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, Any]]:
+    working = df.copy()
+    working["standard_type"] = working["standard_type"].fillna("<missing>").astype(str).str.strip()
+    working["standard_units"] = working["standard_units"].fillna("<missing>").astype(str).str.strip()
+
+    endpoint_summary = build_endpoint_summary(working)
+    endpoint_summary.to_csv(cfg.endpoint_summary_csv_path, index=False)
+
+    endpoint_counts = (
+        endpoint_summary.groupby("standard_type", dropna=False)["n_records"]
+        .sum()
+        .astype(int)
+        .to_dict()
+    )
+    unique_standard_types = tuple(endpoint_summary["standard_type"].tolist())
+    logger.info("Endpoint counts by standard_type/standard_units:\n%s", endpoint_summary.to_string(index=False))
+    logger.info("Saved endpoint summary: %s", cfg.endpoint_summary_csv_path)
+
+    decision: dict[str, Any] = {
+        "endpoint_handling": cfg.endpoint_handling,
+        "allowed_standard_types": list(cfg.allowed_standard_types),
+        "detected_standard_types": list(unique_standard_types),
+        "endpoint_counts": endpoint_counts,
+    }
+
+    only_ki_nm = set(unique_standard_types) == {"Ki"} and set(endpoint_summary["standard_units"]) == {"nM"}
+    if only_ki_nm:
+        decision["decision"] = "proceed_with_ki_to_pki_conversion"
+        return working, endpoint_summary, decision
+
+    if set(unique_standard_types) == {"Ki"} and set(endpoint_summary["standard_units"]) != {"nM"}:
+        raise ValueError(
+            "Script-02 received Ki-only data, but standard_units are not exclusively 'nM'. "
+            f"Review {cfg.endpoint_summary_csv_path} or regenerate Script-01 output."
+        )
+
+    if cfg.endpoint_handling == "error":
+        raise ValueError(
+            "Script-02 detected mixed or non-Ki endpoint types in Script-01 output. "
+            f"Detected standard_type values: {list(unique_standard_types)}. "
+            f"Endpoint summary written to {cfg.endpoint_summary_csv_path}. "
+            "Set script_02.endpoint_handling: filter and script_02.allowed_standard_types: ['Ki'] "
+            "to continue explicitly."
+        )
+
+    before_filter = len(working)
+    working = working[
+        working["standard_type"].isin(cfg.allowed_standard_types)
+        & (working["standard_units"] == "nM")
+    ].copy()
+    decision["decision"] = "filtered_explicitly_via_config"
+    decision["rows_removed_by_endpoint_filter"] = int(before_filter - len(working))
+
+    remaining_types = sorted(working["standard_type"].dropna().unique().tolist())
+    decision["remaining_standard_types"] = remaining_types
+    logger.info(
+        "Applied explicit endpoint filter with allowed_standard_types=%s; kept %d/%d rows.",
+        list(cfg.allowed_standard_types),
+        len(working),
+        before_filter,
+    )
+
+    if working.empty:
+        raise ValueError(
+            "Explicit endpoint filtering removed all rows. "
+            f"Review {cfg.endpoint_summary_csv_path} and script_02.allowed_standard_types."
+        )
+
+    if set(remaining_types) != {"Ki"}:
+        raise ValueError(
+            "Script-02 can compute pKi only after explicit filtering leaves Ki-only records. "
+            f"Remaining standard_type values: {remaining_types}."
+        )
+
+    return working, endpoint_summary, decision
+
+
 def standardize_smiles(smiles: str) -> tuple[str | None, str | None]:
     if not isinstance(smiles, str) or not smiles.strip():
         return None, "missing_smiles"
@@ -264,31 +381,27 @@ def standardize_smiles(smiles: str) -> tuple[str | None, str | None]:
         return None, "standardization_failed"
 
 
-def curate_dataset(df: pd.DataFrame, cfg: AppConfig, logger: logging.Logger) -> tuple[pd.DataFrame, dict[str, int]]:
+def curate_dataset(
+    df: pd.DataFrame,
+    cfg: AppConfig,
+    logger: logging.Logger,
+) -> tuple[pd.DataFrame, dict[str, int], pd.DataFrame, dict[str, Any]]:
     counters: dict[str, int] = {"rows_input": int(len(df))}
 
-    working = df.copy()
+    working, endpoint_summary, endpoint_decision = validate_and_prepare_endpoints(df, cfg, logger)
+    counters["removed_by_endpoint_validation_or_filter"] = int(len(df) - len(working))
+
     working["original_smiles"] = working["canonical_smiles"]
-
-    working["standard_type"] = working["standard_type"].astype(str)
-    working["standard_units"] = working["standard_units"].astype(str)
-
-    before_ki_filter = len(working)
-    working = working[(working["standard_type"] == "Ki") & (working["standard_units"] == "nM")]
-    counters["removed_non_ki_nm"] = int(before_ki_filter - len(working))
-
     working["ki_nM"] = pd.to_numeric(working["standard_value"], errors="coerce")
     before_ki_valid = len(working)
-    working = working[working["ki_nM"].notna() & (working["ki_nM"] > 0)]
+    working = working[working["ki_nM"].notna() & (working["ki_nM"] > 0)].copy()
     counters["removed_invalid_or_nonpositive_ki"] = int(before_ki_valid - len(working))
 
     results = working["original_smiles"].map(standardize_smiles)
     working["standardized_smiles"] = [res[0] for res in results]
     working["smiles_failure_reason"] = [res[1] for res in results]
 
-    for reason, count in (
-        working["smiles_failure_reason"].fillna("ok").value_counts().to_dict().items()
-    ):
+    for reason, count in working["smiles_failure_reason"].fillna("ok").value_counts().to_dict().items():
         counters[f"smiles_{reason}"] = int(count)
 
     working = working[working["standardized_smiles"].notna()].copy()
@@ -301,7 +414,7 @@ def curate_dataset(df: pd.DataFrame, cfg: AppConfig, logger: logging.Logger) -> 
     working = working[working["heavy_atom_count"] >= cfg.min_heavy_atoms].copy()
     counters["removed_low_heavy_atom_count"] = int(before_heavy - len(working))
 
-    working["molecular_weight"] = standardized_mol.map(
+    working["molecular_weight"] = standardized_mol.loc[working.index].map(
         lambda m: round(Descriptors.MolWt(m), 3) if m is not None else math.nan
     )
     working["pKi"] = 9.0 - working["ki_nM"].map(math.log10)
@@ -309,7 +422,7 @@ def curate_dataset(df: pd.DataFrame, cfg: AppConfig, logger: logging.Logger) -> 
     counters["rows_after_curation"] = int(len(working))
 
     logger.info("Curation counters: %s", counters)
-    return working, counters
+    return working, counters, endpoint_summary, endpoint_decision
 
 
 def aggregate_duplicate_measurements(curated: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -338,9 +451,7 @@ def aggregate_duplicate_measurements(curated: pd.DataFrame) -> tuple[pd.DataFram
         "median_pKi",
         "pKi_std",
         "n_unique_compound_ids",
-        *(
-            ["n_unique_assays"] if "assay_chembl_id" in curated.columns else []
-        ),
+        *(["n_unique_assays"] if "assay_chembl_id" in curated.columns else []),
         *(["n_unique_documents"] if doc_column is not None else []),
     ]
 
@@ -373,10 +484,7 @@ def build_kinase_counts(aggregated: pd.DataFrame) -> pd.DataFrame:
     return counts
 
 
-def write_report(
-    cfg: AppConfig,
-    report: dict[str, Any],
-) -> None:
+def write_report(cfg: AppConfig, report: dict[str, Any]) -> None:
     with cfg.curation_report_json_path.open("w", encoding="utf-8") as handle:
         json.dump(report, handle, indent=2, sort_keys=True)
 
@@ -399,11 +507,11 @@ def main() -> int:
         logger.info("Saved config snapshot: %s", config_snapshot)
 
         validate_input_file(cfg.input_csv_path)
-        logger.info("Reading Script-01 output: %s", cfg.input_csv_path)
+        logger.info("Reading Script-01 output from script_02.input_csv_path: %s", cfg.input_csv_path)
         raw_df = pd.read_csv(cfg.input_csv_path)
         validate_required_columns(raw_df)
 
-        curated_records, counters = curate_dataset(raw_df, cfg, logger)
+        curated_records, counters, endpoint_summary, endpoint_decision = curate_dataset(raw_df, cfg, logger)
         curated_records = curated_records.sort_values(
             by=["target_chembl_id", "standardized_smiles", "ki_nM"], kind="mergesort"
         )
@@ -432,6 +540,7 @@ def main() -> int:
                 "duplicate_summary_csv": str(cfg.duplicate_summary_csv_path),
                 "kinase_counts_csv": str(cfg.kinase_counts_csv_path),
                 "intermediate_standardized_csv": str(cfg.intermediate_standardized_csv_path),
+                "endpoint_summary_csv": str(cfg.endpoint_summary_csv_path),
                 "report_json": str(cfg.curation_report_json_path),
                 "config_snapshot_yaml": str(config_snapshot),
                 "log_file": str(log_file),
@@ -449,8 +558,10 @@ def main() -> int:
                 ),
             },
             "filtering_decisions": counters,
+            "endpoint_validation": endpoint_decision,
+            "endpoint_summary": endpoint_summary.to_dict(orient="records"),
             "notes": {
-                "continuity": "Script-02 strictly consumes Script-01 raw CSV output.",
+                "continuity": "Script-02 strictly consumes the Script-01 CSV provided via script_02.input_csv_path.",
                 "future_steps": (
                     "No kinase matrix construction, selectivity labeling, or modeling is "
                     "performed in this script."
