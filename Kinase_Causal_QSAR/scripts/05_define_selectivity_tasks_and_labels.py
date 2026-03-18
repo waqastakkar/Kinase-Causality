@@ -116,6 +116,14 @@ ACTIVITY_CLIFF_OUTPUT_COLUMNS = [
     "max_activity_cliff_delta_pki_for_target",
     "max_activity_cliff_similarity_for_target",
 ]
+ACTIVITY_CLIFF_COLUMN_ALIASES: dict[str, tuple[str, ...]] = {
+    "target_chembl_id": ("target_chembl_id",),
+    "compound_id_a": ("compound_id_a", "compound_id_1"),
+    "compound_id_b": ("compound_id_b", "compound_id_2"),
+    "activity_cliff_flag": ("activity_cliff_flag",),
+    "delta_pKi": ("delta_pKi", "delta_pki"),
+    "tanimoto_similarity": ("tanimoto_similarity", "similarity", "pairwise_similarity"),
+}
 
 
 @dataclass
@@ -452,14 +460,22 @@ def aggregate_activity_cliff_flags(activity_cliff_df: pd.DataFrame) -> pd.DataFr
     if activity_cliff_df.empty:
         return pd.DataFrame(columns=["compound_id", "target_chembl_id", *ACTIVITY_CLIFF_OUTPUT_COLUMNS])
 
-    required_cols = {"target_chembl_id", "compound_id_a", "compound_id_b", "activity_cliff_flag", "delta_pKi", "tanimoto_similarity"}
-    missing = sorted(required_cols.difference(activity_cliff_df.columns))
+    standardized = activity_cliff_df.copy()
+    rename_map: dict[str, str] = {}
+    missing: list[str] = []
+    for canonical, aliases in ACTIVITY_CLIFF_COLUMN_ALIASES.items():
+        source_column = next((alias for alias in aliases if alias in standardized.columns), None)
+        if source_column is None:
+            missing.append(canonical)
+            continue
+        rename_map[source_column] = canonical
     if missing:
         raise ValueError(
-            "Activity-cliff file is missing required columns for propagation: " + ", ".join(missing)
+            "Activity-cliff file is missing required columns for propagation: " + ", ".join(sorted(missing))
         )
 
-    flagged = activity_cliff_df.copy()
+    standardized = standardized.rename(columns=rename_map)
+    flagged = standardized.copy()
     flagged["activity_cliff_flag"] = flagged["activity_cliff_flag"].fillna(False).astype(bool)
     flagged = flagged[flagged["activity_cliff_flag"]].copy()
     if flagged.empty:
