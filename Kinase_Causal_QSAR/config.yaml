@@ -94,3 +94,45 @@ script_04:
   max_pairs_for_cliff_analysis_per_kinase: 200000
 
   save_config_snapshot: true
+
+# Script-05 selectivity task generation settings
+script_05:
+  input_annotated_long_path: data/processed/chembl_human_kinase_panel_annotated_long.csv
+  input_activity_cliff_path: data/processed/activity_cliff_annotations.csv
+
+  output_regression_long_path: data/processed/task_multitask_regression_long.csv
+  output_pairwise_selectivity_path: data/processed/task_pairwise_selectivity_regression.csv
+  output_target_vs_panel_path: data/processed/task_target_vs_panel_selectivity.csv
+  output_classification_path: data/processed/task_derived_classification_labels.csv
+  output_task_summary_path: data/processed/task_summary_table.csv
+  output_report_path: reports/05_selectivity_task_report.json
+
+  build_multitask_regression_task: true
+  build_pairwise_selectivity_task: true
+  build_target_vs_panel_task: true
+  build_classification_tasks: true
+
+  min_kinases_per_compound_for_selectivity: 2
+  min_offtargets_per_compound: 1
+
+  pairwise_selectivity_mode: all_pairs
+  pairwise_selectivity_min_delta_pki: 0.0
+  pairwise_selectivity_save_directional_pairs: true
+
+  target_vs_panel_reference: median_offtarget
+  target_vs_panel_min_offtargets: 2
+
+  classification_active_threshold_pki: 7.0
+  classification_inactive_threshold_pki: 6.0
+  classification_strong_binder_threshold_pki: 8.0
+  classification_weak_binder_threshold_pki: 6.0
+  selective_threshold_delta_pki: 1.0
+  highly_selective_threshold_delta_pki: 2.0
+
+  gray_zone_policy: exclude
+  save_only_labeled_classification_rows: false
+
+  include_environment_columns_in_outputs: true
+  include_activity_cliff_flags_in_outputs: true
+
+  save_config_snapshot: true

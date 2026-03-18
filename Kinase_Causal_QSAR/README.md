@@ -275,3 +275,82 @@ Script-04 performs kinase-specific activity-cliff analysis using configurable Mo
 - The exact resolved configuration is copied to `configs_used/` when enabled.
 - Missing metadata, kinase-family fallback logic, invalid SMILES handling, and skipped activity-cliff computations are recorded in both logs and the JSON report.
 - This step prepares causal-learning inputs only and does not fit any machine-learning model.
+
+---
+
+## Script-05: Define selectivity-aware modeling tasks and derived labels
+
+### Purpose
+Read the Script-04 annotated kinase panel and convert it into task-ready datasets for later benchmarking. Script-05 preserves the continuous `pKi` regression foundation while deriving selectivity-aware regression targets and optional classification labels.
+
+### Scientific role
+Script-05 prepares the task layer required for later multitask `pKi` regression, pairwise selectivity-margin prediction, target-vs-panel selectivity benchmarking, environment-aware causal evaluation, and optional classification baselines. This step defines tasks only; it does **not** train a model or create dataset splits.
+
+### Required input (from Script-04)
+Configured under `script_05` in `config.yaml`:
+- `data/processed/chembl_human_kinase_panel_annotated_long.csv`
+- Optional propagation of activity-cliff flags from `data/processed/activity_cliff_annotations.csv`
+- Script-05 validates required compound identity, standardized structure, kinase identity, target-name, and `pKi` columns before generating any output.
+
+### Run
+From `Kinase_Causal_QSAR/`:
+```bash
+python scripts/05_define_selectivity_tasks_and_labels.py
+```
+Optional custom config:
+```bash
+python scripts/05_define_selectivity_tasks_and_labels.py --config /path/to/config.yaml
+```
+
+### Multitask regression task
+Script-05 writes one row per observed compound-target pair to:
+- `data/processed/task_multitask_regression_long.csv`
+
+This table is the primary downstream regression dataset and retains continuous `pKi` values, optional `Ki_nM`, support/provenance metadata, environment annotations, and propagated activity-cliff flags when available.
+
+### Pairwise selectivity regression task
+For compounds measured on at least the configured minimum number of kinases, Script-05 generates within-compound kinase-pair rows with:
+- `delta_pKi = pKi_A - pKi_B`
+- `abs_delta_pKi`
+- directional pair labels when enabled in config
+
+Output:
+- `data/processed/task_pairwise_selectivity_regression.csv`
+
+This task supports later selectivity-margin prediction without discarding the underlying continuous activity scale.
+
+### Target-vs-panel selectivity regression task
+For each eligible compound-target observation, Script-05 computes:
+- target `pKi`
+- a config-selected off-target panel reference statistic (for example median, mean, max, or second-best off-target `pKi`)
+- `target_vs_panel_delta_pKi = target_pKi - off_target_reference`
+
+Output:
+- `data/processed/task_target_vs_panel_selectivity.csv`
+
+This dataset supports one-vs-panel selectivity analyses and later benchmarking against alternative off-target reference definitions.
+
+### Derived classification labels
+Script-05 optionally derives publication-traceable classification labels while preserving continuous values in the same output table:
+- active vs inactive from `pKi`
+- strong binder vs weak binder from `pKi`
+- selective / highly selective / non-selective from target-vs-panel `delta_pKi`
+
+Output:
+- `data/processed/task_derived_classification_labels.csv`
+
+Thresholds, gray-zone handling, and label provenance columns are recorded directly in the output and JSON report.
+
+### Additional outputs
+- Task summary table: `data/processed/task_summary_table.csv`
+- JSON report: `reports/05_selectivity_task_report.json`
+- Log file: `logs/05_define_selectivity_tasks_and_labels_YYYYMMDD_HHMMSS.log`
+- Config snapshot: `configs_used/05_define_selectivity_tasks_and_labels_config.yaml`
+
+### Reproducibility notes
+- Script-05 is fully config-driven through `script_05` in `config.yaml`.
+- Required files and columns are validated before task generation begins.
+- Deterministic sorting is applied to all output tables.
+- Thresholds, exclusion rules, gray-zone handling, missing-metadata notes, and label distributions are recorded in the JSON report.
+- The exact config used for the run is copied to `configs_used/` when enabled.
+- This step defines tasks only and does not fit any machine-learning model.
