@@ -309,11 +309,17 @@ def resolve_column_map(df: pd.DataFrame) -> dict[str, str]:
     for canonical_name, aliases in COLUMN_ALIASES.items():
         match = next((candidate for candidate in aliases if candidate in df.columns), None)
         if match is None:
-            if canonical_name in {"unique_assay_count", "unique_document_count"}:
+            if canonical_name in {"compound_id", "unique_assay_count", "unique_document_count"}:
                 continue
             missing.append(canonical_name)
         else:
             resolved[canonical_name] = match
+
+    compound_id_missing = "compound_id" not in resolved
+    standardized_smiles_present = "standardized_smiles" in resolved
+    if compound_id_missing and not standardized_smiles_present:
+        missing = [name for name in missing if name != "standardized_smiles"]
+        missing.append("compound_id_or_standardized_smiles")
 
     if missing:
         missing_message = ", ".join(missing)
@@ -329,6 +335,17 @@ def canonicalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     column_map = resolve_column_map(df)
     rename_map = {source: canonical for canonical, source in column_map.items()}
     working = df.rename(columns=rename_map).copy()
+
+    if "compound_id" not in working.columns:
+        if "standardized_smiles" not in working.columns:
+            raise ValueError(
+                "Script-03 requires either `compound_id` or `standardized_smiles` to identify compounds."
+            )
+        logging.getLogger(__name__).info(
+            "Input file does not provide an explicit `compound_id`; using "
+            "`standardized_smiles` as the canonical compound identifier."
+        )
+        working["compound_id"] = working["standardized_smiles"]
 
     if "unique_assay_count" not in working.columns:
         working["unique_assay_count"] = np.nan
