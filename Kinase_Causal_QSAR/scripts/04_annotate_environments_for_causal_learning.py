@@ -802,6 +802,24 @@ def infer_kinase_family_from_name(target_name: str) -> tuple[str, str]:
     return "Unclassified", "name_match:unclassified"
 
 
+def _coalesce_duplicate_columns(df: pd.DataFrame, canonical_columns: list[str]) -> pd.DataFrame:
+    """Normalize merge-created suffix variants back to canonical column names."""
+
+    normalized = df.copy()
+    for column in canonical_columns:
+        variants = [candidate for candidate in [f"{column}_x", column, f"{column}_y"] if candidate in normalized.columns]
+        if not variants:
+            continue
+        combined = normalized[variants[0]]
+        for variant in variants[1:]:
+            combined = combined.combine_first(normalized[variant])
+        normalized[column] = combined
+        drop_columns = [variant for variant in variants if variant != column]
+        if drop_columns:
+            normalized = normalized.drop(columns=drop_columns)
+    return normalized
+
+
 def annotate_kinases(df: pd.DataFrame, kinase_summary_df: pd.DataFrame, cfg: AppConfig) -> tuple[pd.DataFrame, dict[str, Any], list[str]]:
     logging.info("Annotating kinase-level environments.")
     warnings: list[str] = []
@@ -826,6 +844,21 @@ def annotate_kinases(df: pd.DataFrame, kinase_summary_df: pd.DataFrame, cfg: App
         .reset_index()
     )
     kinase_env = merged_summary.merge(long_family, on=["target_chembl_id", "target_name"], how="left", sort=False)
+    kinase_env = _coalesce_duplicate_columns(
+        kinase_env,
+        [
+            "protein_class_desc",
+            "protein_family",
+            "protein_subfamily",
+            "number_of_compounds_measured",
+            "median_pKi",
+            "pKi_spread",
+            "source_diversity",
+            "document_diversity",
+            "assay_diversity",
+            "number_of_records",
+        ],
+    )
     kinase_env["target_name_normalized"] = kinase_env["target_name"].map(normalize_target_name)
 
     family_sources = []
