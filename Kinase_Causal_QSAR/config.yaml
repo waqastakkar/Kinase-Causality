@@ -267,3 +267,92 @@ script_07:
     use_small_grid_search: true
     cv_folds_inner: 3
 
+# Script-08 graph/deep baseline modeling settings
+script_08:
+  input_regression_long_path: data/processed/task_multitask_regression_long.csv
+  input_pairwise_selectivity_path: data/processed/task_pairwise_selectivity_regression.csv
+  input_target_vs_panel_path: data/processed/task_target_vs_panel_selectivity.csv
+  input_classification_path: data/processed/task_derived_classification_labels.csv
+  input_split_manifest_path: data/splits/split_manifest.csv
+
+  output_model_root: models/deep_baselines
+  output_metrics_root: results/deep_baselines
+  output_predictions_root: results/deep_baselines/predictions
+  output_figures_root: figures/deep_baselines
+  output_report_path: reports/08_deep_baseline_report.json
+
+  random_seed: 2025
+  device: auto
+  num_workers: 4
+  batch_size: 64
+  max_epochs: 100
+  early_stopping_patience: 15
+  learning_rate: 0.001
+  weight_decay: 0.00001
+
+  run_multitask_regression: true
+  run_pairwise_selectivity_regression: true
+  run_target_vs_panel_regression: true
+  run_classification_tasks: true
+
+  molecular_input_representation: graph
+
+  graph_models:
+    - gin
+    - gcn
+    - mpnn
+    - gat
+
+  sequence_or_target_encoding:
+    use_target_identity_embedding: true
+    use_kinase_family_embedding: true
+    use_pair_target_encoding: true
+
+  multitask_strategy: shared_encoder_multitask_heads
+  pairwise_strategy: compound_graph_plus_target_pair_embedding
+  target_vs_panel_strategy: compound_graph_plus_target_embedding
+
+  node_features:
+    use_atom_type: true
+    use_degree: true
+    use_formal_charge: true
+    use_hybridization: true
+    use_aromaticity: true
+    use_num_hs: true
+    use_chirality: true
+
+  edge_features:
+    use_bond_type: true
+    use_conjugation: true
+    use_ring_status: true
+    use_stereo: true
+
+  training:
+    gradient_clip_norm: 5.0
+    scheduler: reduce_on_plateau
+    mixed_precision: false
+    save_best_only: true
+    regression_loss: mse
+    classification_loss: bce
+    class_weighting: true
+
+  save_trained_models: true
+  save_model_checkpoints: true
+  save_fold_predictions: true
+  save_test_predictions: true
+  save_latent_embeddings: false
+  save_error_tables: true
+  save_config_snapshot: true
+
+  make_figures: true
+  export_svg: true
+  export_png: true
+  export_pdf: true
+
+  figure_style:
+    font_family: Times New Roman
+    bold_text: true
+    output_format_primary: svg
+    palette_name: nature_manuscript_palette
+    dpi_png: 300
+

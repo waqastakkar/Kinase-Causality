@@ -542,4 +542,110 @@ python scripts/07_train_classical_baseline_models.py --config /path/to/config.ya
 - Fold-level metrics and row-level predictions are saved for auditing.
 - Missing required files, columns, or split assignments trigger clear failures.
 - Optional dependencies such as XGBoost and LightGBM are skipped with explicit warnings if unavailable.
+---
+
+## Script-08: Graph and deep-learning baseline models
+
+### Purpose
+Script-08 trains strong non-causal neural reference baselines for the benchmark tasks defined in Script-05 using the deterministic benchmark splits generated in Script-06. The step covers compound-only graph regression, kinase-aware multitask regression, pairwise selectivity regression, target-vs-panel regression, and optional derived classification tasks.
+
+### Scientific role
+These models provide manuscript-grade deep-learning baselines for later comparison against:
+- classical baselines from Script-07
+- future causal representation-learning models
+- robustness analyses under scaffold, kinase-family, and provenance shifts
+
+This step does **not** implement a causal model. It is a neural baseline benchmark only.
+
+### Required inputs
+Configured under `script_08` in `config.yaml`:
+- `data/processed/task_multitask_regression_long.csv`
+- `data/processed/task_pairwise_selectivity_regression.csv`
+- `data/processed/task_target_vs_panel_selectivity.csv`
+- `data/processed/task_derived_classification_labels.csv`
+- `data/splits/split_manifest.csv`
+- split assignment files written by Script-06
+
+Optional annotation files are used when available for kinase-family enrichment and downstream reporting consistency:
+- `data/processed/compound_environment_annotations.csv`
+- `data/processed/kinase_environment_annotations.csv`
+- `data/processed/source_environment_annotations.csv`
+- `data/processed/activity_cliff_annotations.csv`
+
+### Graph features
+Graphs are built from `standardized_smiles` using RDKit and PyTorch Geometric. Node and edge features are config-driven and currently support:
+- atom type
+- atom degree
+- formal charge
+- hybridization
+- aromaticity
+- hydrogen count
+- chirality
+- bond type
+- conjugation
+- ring membership
+- bond stereochemistry
+
+### Models trained
+Configured graph baselines currently support:
+- GCN
+- GIN
+- MPNN
+- GAT
+
+Kinase-aware tasks can incorporate:
+- target identity embeddings
+- kinase-family embeddings
+- pair-target embeddings for selectivity tasks
+
+### Split strategies supported
+Script-08 consumes the split manifest from Script-06 and trains/evaluates on any supported assignment tables present there, including:
+- random splits
+- scaffold splits
+- kinase-family grouped splits
+- source/environment grouped splits
+- low-data subsets when generated in Script-06
+
+### Outputs
+Primary output locations:
+- trained models: `models/deep_baselines/`
+- metrics tables: `results/deep_baselines/`
+- row-level predictions: `results/deep_baselines/predictions/`
+- manuscript-style figures: `figures/deep_baselines/`
+- JSON report: `reports/08_deep_baseline_report.json`
+
+At minimum, Script-08 writes:
+- `results/deep_baselines/regression_metrics_per_fold.csv`
+- `results/deep_baselines/regression_metrics_summary.csv`
+- `results/deep_baselines/classification_metrics_per_fold.csv`
+- `results/deep_baselines/classification_metrics_summary.csv`
+- graph cache metadata and optional error-analysis tables
+- per-split prediction tables with observed and predicted values
+
+### Figure outputs
+When plotting dependencies are available, Script-08 writes publication-style SVG-first figures and optional PNG/PDF exports for:
+- regression model comparisons
+- split-strategy comparisons
+- classification model comparisons
+- observed-vs-predicted scatterplots
+- ROC and precision-recall curves for top classification baselines
+
+### Run
+From `Kinase_Causal_QSAR/`:
+```bash
+python scripts/08_train_graph_and_deep_baseline_models.py
+```
+Optional custom config:
+```bash
+python scripts/08_train_graph_and_deep_baseline_models.py --config /path/to/config.yaml
+```
+
+### Reproducibility notes
+- All settings are read from `config.yaml` under `script_08`.
+- Deterministic seeds are set for Python, NumPy, and PyTorch where possible.
+- The exact config snapshot is copied to `configs_used/` when enabled.
+- Split identities are preserved in metrics, predictions, error tables, and the JSON report.
+- Graph-construction success/failure metadata are written for auditability.
+- Figures use a fixed manuscript-style palette with Times New Roman bold text to stay consistent with downstream publication assets.
+- Script-08 fails clearly if required files, columns, PyTorch Geometric, or RDKit are unavailable.
 
