@@ -136,3 +136,61 @@ script_05:
   include_activity_cliff_flags_in_outputs: true
 
   save_config_snapshot: true
+
+# Script-06 benchmark split generation settings
+script_06:
+  input_regression_long_path: data/processed/task_multitask_regression_long.csv
+  input_pairwise_selectivity_path: data/processed/task_pairwise_selectivity_regression.csv
+  input_target_vs_panel_path: data/processed/task_target_vs_panel_selectivity.csv
+  input_classification_path: data/processed/task_derived_classification_labels.csv
+  input_activity_cliff_path: data/processed/activity_cliff_annotations.csv
+
+  output_split_manifest_path: data/splits/split_manifest.csv
+  output_split_report_path: reports/06_benchmark_splits_report.json
+
+  random_seed: 2025
+  n_folds: 5
+
+  build_random_split: true
+  build_scaffold_split: true
+  build_grouped_kinase_family_split: true
+  build_source_environment_split: true
+  build_activity_cliff_flagged_subsets: true
+  build_low_data_subsets: true
+
+  train_fraction: 0.70
+  valid_fraction: 0.15
+  test_fraction: 0.15
+
+  scaffold_column_candidates:
+    - murcko_scaffold
+    - scaffold
+    - generic_murcko_scaffold
+    - generic_scaffold
+
+  kinase_family_column_candidates:
+    - kinase_family
+    - kinase_family_label
+    - target_family
+    - broad_kinase_family
+
+  source_environment_column_candidates:
+    - source_id
+    - source_description
+    - doc_id
+    - source_frequency_bin
+
+  activity_cliff_column_candidates:
+    - activity_cliff_flag
+    - cliff_flag
+
+  min_examples_per_group: 20
+  low_data_subset_train_sizes:
+    - 50
+    - 100
+    - 250
+    - 500
+
+  save_row_level_split_assignments: true
+  save_fold_level_split_assignments: true
+  save_config_snapshot: true

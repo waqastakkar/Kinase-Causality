@@ -354,3 +354,95 @@ Thresholds, gray-zone handling, and label provenance columns are recorded direct
 - Thresholds, exclusion rules, gray-zone handling, missing-metadata notes, and label distributions are recorded in the JSON report.
 - The exact config used for the run is copied to `configs_used/` when enabled.
 - This step defines tasks only and does not fit any machine-learning model.
+
+---
+
+## Script-06: Generate benchmark splits for downstream evaluation
+
+### Purpose
+Read the Script-05 task datasets and generate rigorous, reproducible split definitions for later regression, classification, robustness, and causal-QSAR benchmarking. Script-06 defines train/validation/test assignments and subset manifests only; it does **not** train or evaluate any model.
+
+### Scientific role
+Script-06 prepares the benchmark split layer needed for:
+- baseline model benchmarking
+- causal model evaluation
+- scaffold generalization testing
+- kinase-family transfer testing
+- source/environment shift testing
+- activity-cliff-aware evaluation
+- low-data benchmarking
+
+### Required inputs (from Script-05)
+Configured under `script_06` in `config.yaml`:
+- `data/processed/task_multitask_regression_long.csv`
+- `data/processed/task_pairwise_selectivity_regression.csv`
+- `data/processed/task_target_vs_panel_selectivity.csv`
+- `data/processed/task_derived_classification_labels.csv`
+
+Optional activity-cliff provenance input:
+- `data/processed/activity_cliff_annotations.csv`
+
+Script-06 validates that each task table contains a canonical compound identifier plus the task-specific target columns required for split generation.
+
+### Run
+From `Kinase_Causal_QSAR/`:
+```bash
+python scripts/06_generate_benchmark_splits.py
+```
+Optional custom config:
+```bash
+python scripts/06_generate_benchmark_splits.py --config /path/to/config.yaml
+```
+
+### Split strategies
+
+#### Random split
+Script-06 creates deterministic seeded train/validation/test assignments for every task table and also writes seeded k-fold random benchmarking metadata for later cross-validation workflows.
+
+#### Scaffold split
+When scaffold metadata are available, Script-06 resolves the first configured scaffold column and assigns whole scaffold groups to train/validation/test to prevent scaffold leakage across partitions.
+
+#### Kinase-family grouped split
+When kinase-family annotations are available, Script-06 creates family-held-out assignments so whole kinase families are separated across train/validation/test for transfer and robustness studies.
+
+#### Source/environment grouped split
+When provenance/source columns are available, Script-06 creates grouped holdout splits for source, document, or source-frequency environments to support assay/source shift benchmarking.
+
+#### Activity-cliff subsets
+When activity-cliff flags are available in the task tables, Script-06 writes manifest files that distinguish cliff-associated and non-cliff observations for later targeted evaluation.
+
+#### Low-data subsets
+For multitask regression and classification, Script-06 writes deterministic nested training subsets at configured train sizes while keeping the base validation/test holdout definitions fixed for later few-shot benchmarking.
+
+### Outputs
+Script-06 writes a structured split directory:
+
+```text
+data/splits/
+  split_manifest.csv
+  multitask_regression/
+  pairwise_selectivity/
+  target_vs_panel/
+  classification/
+```
+
+Within each task-specific split directory, Script-06 writes benchmark artifacts such as:
+- row-level split assignment CSVs
+- random k-fold assignment and fold-summary CSVs
+- grouped split summary CSVs
+- activity-cliff subset manifests
+- low-data subset manifests when enabled
+
+Top-level outputs:
+- Master split manifest: `data/splits/split_manifest.csv`
+- JSON report: `reports/06_benchmark_splits_report.json`
+- Log file: `logs/06_generate_benchmark_splits_YYYYMMDD_HHMMSS.log`
+- Config snapshot: `configs_used/06_generate_benchmark_splits_config.yaml`
+
+### Reproducibility notes
+- Script-06 is fully config-driven through `script_06` in `config.yaml`.
+- Required input files and required task columns are validated before any split file is written.
+- Deterministic sorting and fixed seeded shuffling are used for reproducible split generation.
+- Selected grouping columns, split counts, missing-metadata warnings, and subset coverage summaries are recorded in the JSON report.
+- The exact config used for the run is copied to `configs_used/` when enabled.
+- This step defines splits and subset manifests only and does not fit or evaluate any model.
