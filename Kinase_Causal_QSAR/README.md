@@ -15,7 +15,7 @@ pip install -r requirements.txt
 ```
 
 ## Configure
-Edit `config.yaml` and set `chembl_sqlite_path` to your local SQLite file. Script-specific paths and thresholds for Script-02 are also configurable under `script_02`.
+Edit `config.yaml` and set `chembl_sqlite_path` to your local SQLite file. Script-specific paths, endpoint-handling rules, and thresholds for Script-02 are configurable under `script_02`.
 
 ---
 
@@ -93,7 +93,9 @@ Note: variant/mutant exclusion is intentionally disabled at this diagnostic stag
 Read Script-01 raw output and perform chemical curation + deterministic aggregation to generate publication-ready interim kinase Ki data.
 
 ### Required input (from Script-01)
-- `data/raw/chembl_human_kinase_ki_raw.csv`
+- Script-02 reads **only** `script_02.input_csv_path` from `config.yaml`.
+- For Step-2, point `script_02.input_csv_path` to Script-01's strict Ki output: `data/raw/chembl_human_kinase_strict_raw.csv`.
+- Do **not** rely on the legacy selected-mode file `data/raw/chembl_human_kinase_ki_raw.csv` for Step-2, because that file may now contain broad mixed endpoints depending on how Script-01 was run.
 
 ### Run
 From `Kinase_Causal_QSAR/`:
@@ -110,13 +112,16 @@ python scripts/02_curate_and_aggregate_kinase_ki.py --config /path/to/config.yam
 - Duplicate/replicate aggregation summary: `data/interim/chembl_human_kinase_ki_duplicate_summary.csv`
 - Per-kinase record counts: `data/interim/kinase_record_counts.csv`
 - Standardized intermediate records (pre-aggregation): `data/interim/chembl_human_kinase_ki_standardized_records.csv`
+- Endpoint summary written before any activity transformation: `reports/02_endpoint_summary.csv`
 - Curation report: `reports/02_curation_report.json`
 - Log file: `logs/02_curate_and_aggregate_kinase_ki_YYYYMMDD_HHMMSS.log`
 - Config snapshot: `configs_used/02_curate_and_aggregate_kinase_ki_config.yaml`
 
 ### Reproducibility notes
-- Script-02 fails clearly if Script-01 output is missing.
-- Required columns are validated before processing.
+- Script-02 fails clearly if the configured Script-01 output is missing.
+- Required columns and `standard_type` values are validated before any activity transformation.
+- If the configured input contains only `Ki` in `nM`, Script-02 computes pKi from Ki.
+- If the configured input contains mixed endpoint types (for example `Ki`, `IC50`, `Kd`), Script-02 logs endpoint counts, saves `reports/02_endpoint_summary.csv`, and then either stops with a clear error (`endpoint_handling: error`) or filters explicitly according to `script_02.allowed_standard_types` (`endpoint_handling: filter`).
 - Filtering counts and provenance metadata are written to `reports/02_curation_report.json`.
 - The exact run configuration (with resolved paths and parameters) is written to `configs_used/`.
 - Deterministic sorting is used for stable output generation.
