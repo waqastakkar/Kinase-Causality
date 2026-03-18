@@ -36,3 +36,21 @@ script_02:
   allowed_standard_types:
     - Ki
   min_heavy_atoms: 3
+
+# Script-03 kinase panel and sparse matrix settings
+script_03:
+  input_csv_path: data/interim/chembl_human_kinase_ki_curated_regression_long.csv
+  output_long_path: data/processed/chembl_human_kinase_panel_long.csv
+  output_matrix_path: data/processed/chembl_human_kinase_pki_matrix.csv
+  output_mask_path: data/processed/chembl_human_kinase_observation_mask.csv
+  output_kinase_summary_path: data/processed/kinase_panel_summary.csv
+  output_overlap_matrix_path: data/processed/kinase_compound_overlap_matrix.csv
+  output_compound_summary_path: data/processed/compound_panel_summary.csv
+  output_panel_report_path: reports/03_kinase_panel_report.json
+  min_records_per_kinase: 200
+  min_unique_compounds_per_kinase: 200
+  min_kinases_per_compound: 2
+  min_overlap_compounds_between_kinases: 20
+  drop_singleton_compounds: true
+  save_dense_matrix_copy: true
+

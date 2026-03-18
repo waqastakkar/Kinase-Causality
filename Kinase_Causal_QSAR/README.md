@@ -129,3 +129,63 @@ python scripts/02_curate_and_aggregate_kinase_ki.py --config /path/to/config.yam
 ### Figure output notes
 - Script-02 does not generate figures.
 - A fixed manuscript-grade color palette is stored in `config.yaml` for reuse by future plotting scripts.
+
+---
+
+## Script-03: Build the final kinase panel and sparse pKi matrix
+
+### Purpose
+Read the Script-02 curated regression-ready long-format dataset, select the final kinase study panel using configurable density thresholds, quantify cross-kinase compound overlap, and export sparse matrix artifacts for downstream causal-QSAR benchmarking.
+
+### Scientific role
+Script-03 is the bridge between cleaned continuous `pKi` regression data from Script-02 and later multitask, sparse-matrix, selectivity, and causal-learning stages. This step prepares the final panel and matrix structures only; it does **not** perform any model training, selectivity labeling, causal environment creation, or activity classification.
+
+### Required input (from Script-02)
+- `script_03.input_csv_path` in `config.yaml`
+- Default expected path: `data/interim/chembl_human_kinase_ki_curated_regression_long.csv`
+
+Script-03 validates that the configured Script-02 output contains the expected aggregated compound, kinase, and `pKi` columns before building any panel outputs.
+
+### Run
+From `Kinase_Causal_QSAR/`:
+```bash
+python scripts/03_build_kinase_panel_and_matrix.py
+```
+Optional custom config:
+```bash
+python scripts/03_build_kinase_panel_and_matrix.py --config /path/to/config.yaml
+```
+
+### Panel selection logic
+The final kinase panel is selected entirely from `script_03` thresholds in `config.yaml`.
+At minimum, each kinase must satisfy:
+- `min_records_per_kinase`
+- `min_unique_compounds_per_kinase`
+
+After kinase filtering, compounds can optionally be removed when they are measured against fewer than `min_kinases_per_compound` selected kinases, controlled by `drop_singleton_compounds`.
+
+### Sparse matrix outputs
+Script-03 builds two aligned compound × kinase matrices:
+- `chembl_human_kinase_pki_matrix.csv`: sparse regression matrix with aggregated `pKi` values and missing entries left as missing (`NaN`/blank)
+- `chembl_human_kinase_observation_mask.csv`: binary observation mask with `1` for measured pairs and `0` for missing pairs
+
+No imputation is performed in this step.
+
+### Outputs
+- Final long-format panel dataset: `data/processed/chembl_human_kinase_panel_long.csv`
+- Sparse compound × kinase pKi matrix: `data/processed/chembl_human_kinase_pki_matrix.csv`
+- Observation mask matrix: `data/processed/chembl_human_kinase_observation_mask.csv`
+- Final kinase summary table: `data/processed/kinase_panel_summary.csv`
+- Final compound summary table: `data/processed/compound_panel_summary.csv`
+- Kinase shared-compound overlap matrix: `data/processed/kinase_compound_overlap_matrix.csv`
+- Panel report: `reports/03_kinase_panel_report.json`
+- Log file: `logs/03_build_kinase_panel_and_matrix_YYYYMMDD_HHMMSS.log`
+- Config snapshot: `configs_used/03_build_kinase_panel_and_matrix_config.yaml`
+- Optional diagnostics when enabled: dense matrix copy plus Jaccard and overlap-coefficient matrices
+
+### Reproducibility notes
+- Script-03 fails clearly if the configured Script-02 input file is missing or lacks required columns.
+- All filtering decisions, selected thresholds, overlap diagnostics, matrix dimensions, density statistics, and removed-kinase reasons are captured in the JSON report.
+- Deterministic row and column sorting is used for stable output generation.
+- The exact resolved configuration is copied to `configs_used/` for auditability.
+- This step prepares modeling inputs only and does not fit any machine-learning model.
