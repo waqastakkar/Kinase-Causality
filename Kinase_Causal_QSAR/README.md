@@ -189,3 +189,84 @@ No imputation is performed in this step.
 - Deterministic row and column sorting is used for stable output generation.
 - The exact resolved configuration is copied to `configs_used/` for auditability.
 - This step prepares modeling inputs only and does not fit any machine-learning model.
+
+
+---
+
+## Script-04: Annotate causal-learning environments for the kinase panel
+
+### Purpose
+Read the Script-03 processed kinase regression panel and annotate deterministic compound-, kinase-, source-, and pair-level environments required for downstream causal representation learning, robustness analysis, scaffold/kinase/source-shift benchmarking, and activity-cliff-aware evaluation.
+
+### Scientific role
+Script-04 prepares the causal metadata layer used by later steps for environment-aware dataset splitting, invariant learning analyses, robustness testing under scaffold and kinase-family shifts, activity-cliff benchmarking, and later selectivity-margin derivation. This step only creates annotations and diagnostics; it does **not** train any model.
+
+### Required inputs (from Script-03)
+Configured under `script_04` in `config.yaml`:
+- `data/processed/chembl_human_kinase_panel_long.csv`
+- `data/processed/chembl_human_kinase_pki_matrix.csv`
+- `data/processed/chembl_human_kinase_observation_mask.csv`
+- `data/processed/kinase_panel_summary.csv`
+- Optional supplemental provenance metadata via `script_04.supplemental_metadata_path` when assay/document/source columns are not retained upstream
+
+### Run
+From `Kinase_Causal_QSAR/`:
+```bash
+python scripts/04_annotate_environments_for_causal_learning.py
+```
+Optional custom config:
+```bash
+python scripts/04_annotate_environments_for_causal_learning.py --config /path/to/config.yaml
+```
+
+### Compound environments
+Script-04 creates one deterministic annotation row per standardized compound, including:
+- Bemis-Murcko scaffold and generic Murcko scaffold
+- scaffold frequencies and scaffold-frequency bins
+- RDKit-derived descriptors such as heavy-atom count, ring counts, molecular weight, cLogP, H-bond counts, TPSA, rotatable bonds, formal charge, and fraction Csp3
+- explicit RDKit parse-success tracking for auditability
+
+### Kinase environments
+Script-04 creates one annotation row per retained kinase, including:
+- target identifiers and normalized target names
+- kinase family / broad group / subfamily metadata when available
+- clearly logged fallback family assignment from target-name rules when ChEMBL-style metadata are unavailable
+- number of compounds measured, median pKi, pKi spread, and source/document diversity summaries
+
+### Source and provenance environments
+When provenance metadata are available, Script-04 summarizes source/document/assay environments by:
+- source, document, and assay support counts
+- kinase and compound coverage per provenance environment
+- source/document frequency bins
+- assay diversity within sources
+
+If provenance fields are unavailable, Script-04 continues with explicit `UNAVAILABLE` placeholders and logs the limitation in the JSON report and run log.
+
+### Pair environments
+Script-04 creates one row per compound-kinase observation with:
+- pKi and compound scaffold context
+- kinase family context
+- record, assay, document, and source support counts
+- multiplicity flags for multi-assay / multi-document / multi-source support
+- compound and kinase panel-frequency context features
+
+### Activity-cliff annotations
+Script-04 performs kinase-specific activity-cliff analysis using configurable Morgan fingerprints and Tanimoto similarity thresholds. The output flags structurally similar compound pairs with large `pKi` differences and records scaffold agreement diagnostics. Large kinase-specific pair sets are handled with a logged safety limit controlled by config.
+
+### Outputs
+- Annotated long-format panel: `data/processed/chembl_human_kinase_panel_annotated_long.csv`
+- Compound environments: `data/processed/compound_environment_annotations.csv`
+- Kinase environments: `data/processed/kinase_environment_annotations.csv`
+- Source environments: `data/processed/source_environment_annotations.csv`
+- Pair environments: `data/processed/pair_environment_annotations.csv`
+- Activity-cliff annotations: `data/processed/activity_cliff_annotations.csv`
+- JSON report: `reports/04_environment_annotation_report.json`
+- Log file: `logs/04_annotate_environments_for_causal_learning_YYYYMMDD_HHMMSS.log`
+- Config snapshot: `configs_used/04_annotate_environments_for_causal_learning_config.yaml`
+
+### Reproducibility notes
+- Script-04 validates required Script-03 inputs and column availability before processing.
+- All outputs are written with deterministic sorting for stable downstream use.
+- The exact resolved configuration is copied to `configs_used/` when enabled.
+- Missing metadata, kinase-family fallback logic, invalid SMILES handling, and skipped activity-cliff computations are recorded in both logs and the JSON report.
+- This step prepares causal-learning inputs only and does not fit any machine-learning model.
