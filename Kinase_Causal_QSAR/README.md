@@ -649,3 +649,100 @@ python scripts/08_train_graph_and_deep_baseline_models.py --config /path/to/conf
 - Figures use a fixed manuscript-style palette with Times New Roman bold text to stay consistent with downstream publication assets.
 - Script-08 fails clearly if required files, columns, PyTorch Geometric, or RDKit are unavailable.
 
+
+---
+
+## Script-09: Train the main causal environment-aware model
+
+### Purpose
+Script-09 is the main methods model of the project. It trains and evaluates the causal, environment-aware graph-learning framework for kinase activity and selectivity tasks using Step-04 environment annotations, Step-05 task tables, and Step-06 benchmark split definitions.
+
+### Scientific role
+This step is designed to separate invariant molecular signal from environment-associated spurious signal so later manuscript claims about causal robustness are directly tied to explicit model objectives, diagnostics, and ablations.
+
+### Required inputs (from Steps 04-06)
+Configured under `script_09` in `config.yaml`:
+- `data/processed/chembl_human_kinase_panel_annotated_long.csv`
+- `data/processed/task_multitask_regression_long.csv`
+- `data/processed/task_pairwise_selectivity_regression.csv`
+- `data/processed/task_target_vs_panel_selectivity.csv`
+- `data/processed/task_derived_classification_labels.csv`
+- `data/splits/split_manifest.csv`
+- Step-06 row-level assignment files referenced by the split manifest
+
+Optional environment-rich inputs that are consumed when present include:
+- `data/processed/activity_cliff_annotations.csv`
+- `data/processed/compound_environment_annotations.csv`
+- `data/processed/kinase_environment_annotations.csv`
+- `data/processed/source_environment_annotations.csv`
+- `reports/07_classical_baseline_report.json`
+- `reports/08_deep_baseline_report.json`
+
+### Supported tasks
+- multitask `pKi` regression
+- pairwise selectivity-margin regression (`delta_pKi`)
+- target-vs-panel selectivity regression (`target_vs_panel_delta_pKi`)
+- optional derived binary classification tasks when enabled and sufficiently supported
+
+### Causal objectives supported
+- prediction loss for the selected task
+- IRM-like invariant risk penalty across resolved environments
+- gradient-reversal environment adversarial loss
+- supervised environment classification head for diagnostics/ablations
+- optional counterfactual consistency placeholder with clean disable behavior
+- activity-cliff-aware regularization when cliff flags are available
+
+### Environment types used
+Script-09 resolves the first available configured column for each environment family and logs the exact choice:
+- scaffold / Murcko scaffold environments
+- generic scaffold environments
+- kinase-family environments
+- source/provenance environments
+- activity-cliff flags
+
+If a requested environment is missing, only the dependent objective is disabled; the full script does not fail unless core task requirements are impossible.
+
+### Ablation modes
+When `run_core_ablations: true`, Script-09 runs the main model plus configurable ablations such as:
+- `no_environment_objectives`
+- `no_adversarial_loss`
+- `no_invariant_loss`
+- `no_activity_cliff_regularization`
+- `no_target_embedding`
+
+### Outputs
+Structured outputs are written under:
+- Models: `models/causal_models/`
+- Metrics: `results/causal_models/`
+- Predictions and latent/environment exports: `results/causal_models/predictions/`
+- Figures: `figures/causal_models/`
+- JSON report: `reports/09_causal_model_report.json`
+
+Key tables include:
+- `regression_metrics_per_fold.csv`
+- `regression_metrics_summary.csv`
+- `classification_metrics_per_fold.csv`
+- `classification_metrics_summary.csv`
+- `ablation_metrics_summary.csv`
+- `environment_group_metrics.csv`
+- `activity_cliff_metrics.csv`
+
+### Figure outputs
+Script-09 generates publication-grade manuscript figures using a fixed Nature-style palette with Times New Roman bold text, exporting SVG as the primary format and optional PNG/PDF copies. Source-data CSV files are saved alongside figure outputs when available.
+
+### Run
+From `Kinase_Causal_QSAR/`:
+```bash
+python scripts/09_train_causal_environment_aware_model.py
+```
+Optional custom config:
+```bash
+python scripts/09_train_causal_environment_aware_model.py --config /path/to/config.yaml
+```
+
+### Reproducibility notes
+- All settings are read from `config.yaml` and a config snapshot is saved when enabled.
+- The script uses deterministic seeds where feasible for Python, NumPy, and PyTorch.
+- Graph construction failures, disabled objectives, skipped splits, and other warnings are written to the log and JSON report.
+- Fold-level predictions, metrics, latent embeddings, environment predictions, vocabularies, and model checkpoints can all be saved for full provenance tracking.
+- This step is the central causal modeling contribution of the pipeline and is intended for publication-grade benchmarking and robustness analysis.

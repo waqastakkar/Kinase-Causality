@@ -356,3 +356,115 @@ script_08:
     palette_name: nature_manuscript_palette
     dpi_png: 300
 
+
+
+# Script-09 causal environment-aware modeling settings
+script_09:
+  input_annotated_long_path: data/processed/chembl_human_kinase_panel_annotated_long.csv
+  input_regression_long_path: data/processed/task_multitask_regression_long.csv
+  input_pairwise_selectivity_path: data/processed/task_pairwise_selectivity_regression.csv
+  input_target_vs_panel_path: data/processed/task_target_vs_panel_selectivity.csv
+  input_classification_path: data/processed/task_derived_classification_labels.csv
+  input_split_manifest_path: data/splits/split_manifest.csv
+
+  output_model_root: models/causal_models
+  output_metrics_root: results/causal_models
+  output_predictions_root: results/causal_models/predictions
+  output_figures_root: figures/causal_models
+  output_report_path: reports/09_causal_model_report.json
+
+  random_seed: 2025
+  device: auto
+  num_workers: 4
+  batch_size: 64
+  max_epochs: 120
+  early_stopping_patience: 20
+  learning_rate: 0.001
+  weight_decay: 0.00001
+  gradient_clip_norm: 5.0
+
+  run_multitask_regression: true
+  run_pairwise_selectivity_regression: true
+  run_target_vs_panel_regression: true
+  run_classification_tasks: false
+
+  molecular_encoder: gin
+  hidden_dim: 256
+  num_message_passing_layers: 4
+  dropout: 0.2
+
+  use_target_identity_embedding: true
+  target_embedding_dim: 64
+  use_kinase_family_embedding: true
+  kinase_family_embedding_dim: 32
+
+  environment_columns:
+    scaffold:
+      - murcko_scaffold
+      - scaffold
+    generic_scaffold:
+      - generic_murcko_scaffold
+      - generic_scaffold
+    kinase_family:
+      - kinase_family
+      - kinase_family_label
+    source_environment:
+      - source_id
+      - source_description
+      - source_frequency_bin
+    activity_cliff:
+      - activity_cliff_flag
+      - cliff_flag
+
+  causal_objectives:
+    use_invariant_loss: true
+    use_environment_adversarial_loss: true
+    use_environment_classification_loss: true
+    use_counterfactual_consistency_loss: false
+    use_activity_cliff_regularization: true
+
+  loss_weights:
+    prediction_loss: 1.0
+    invariant_loss: 0.5
+    environment_adversarial_loss: 0.2
+    environment_classification_loss: 0.2
+    counterfactual_consistency_loss: 0.0
+    activity_cliff_regularization_loss: 0.1
+
+  invariant_strategy: irm_like
+  adversarial_strategy: gradient_reversal
+  environment_pooling_strategy: multi_environment_heads
+
+  multitask_strategy: shared_encoder_task_conditioned_head
+  pairwise_strategy: compound_graph_plus_target_pair_embeddings
+  target_vs_panel_strategy: compound_graph_plus_target_embedding
+
+  save_trained_models: true
+  save_model_checkpoints: true
+  save_fold_predictions: true
+  save_test_predictions: true
+  save_latent_embeddings: true
+  save_environment_predictions: true
+  save_error_tables: true
+  save_ablation_results: true
+  save_config_snapshot: true
+
+  run_core_ablations: true
+  ablations:
+    - no_environment_objectives
+    - no_adversarial_loss
+    - no_invariant_loss
+    - no_activity_cliff_regularization
+    - no_target_embedding
+
+  make_figures: true
+  export_svg: true
+  export_png: true
+  export_pdf: true
+
+  figure_style:
+    font_family: Times New Roman
+    bold_text: true
+    output_format_primary: svg
+    palette_name: nature_manuscript_palette
+    dpi_png: 300

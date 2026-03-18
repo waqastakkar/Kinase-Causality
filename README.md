@@ -3,4 +3,4 @@
 Project code and pipeline documentation live under `Kinase_Causal_QSAR/`.
 
 ## Latest pipeline addition
-Step-08 (`Kinase_Causal_QSAR/scripts/08_train_graph_and_deep_baseline_models.py`) trains reproducible non-causal graph/deep-learning baseline models for the kinase causal-QSAR benchmark using Step-05 task tables and Step-06 split manifests, complementing the classical baselines from Step-07. See `Kinase_Causal_QSAR/README.md` for full usage, inputs, outputs, and reproducibility details.
+Step-09 (`Kinase_Causal_QSAR/scripts/09_train_causal_environment_aware_model.py`) trains the main causal, environment-aware graph model for kinase activity and selectivity benchmarking using Step-04 annotations, Step-05 task tables, and Step-06 split manifests, with explicit causal objectives, ablations, and publication-grade outputs. See `Kinase_Causal_QSAR/README.md` for full usage, inputs, outputs, and reproducibility details.
