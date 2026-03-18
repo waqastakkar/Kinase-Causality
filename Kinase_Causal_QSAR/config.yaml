@@ -194,3 +194,76 @@ script_06:
   save_row_level_split_assignments: true
   save_fold_level_split_assignments: true
   save_config_snapshot: true
+
+# Script-07 classical baseline modeling settings
+script_07:
+  input_regression_long_path: data/processed/task_multitask_regression_long.csv
+  input_pairwise_selectivity_path: data/processed/task_pairwise_selectivity_regression.csv
+  input_target_vs_panel_path: data/processed/task_target_vs_panel_selectivity.csv
+  input_classification_path: data/processed/task_derived_classification_labels.csv
+  input_split_manifest_path: data/splits/split_manifest.csv
+
+  output_model_root: models/classical_baselines
+  output_metrics_root: results/classical_baselines
+  output_predictions_root: results/classical_baselines/predictions
+  output_figures_root: figures/classical_baselines
+  output_report_path: reports/07_classical_baseline_report.json
+
+  random_seed: 2025
+  n_jobs: -1
+
+  run_multitask_regression: true
+  run_pairwise_selectivity_regression: true
+  run_target_vs_panel_regression: true
+  run_classification_tasks: true
+
+  descriptor_type: rdkit_2d
+  use_morgan_fingerprints: true
+  morgan_radius: 2
+  morgan_nbits: 2048
+  include_rdkit_2d_descriptors: true
+  include_environment_features: false
+
+  regression_models:
+    - ridge
+    - random_forest
+    - extra_trees
+    - xgboost
+    - lightgbm
+    - svm_rbf
+
+  classification_models:
+    - logistic_regression
+    - random_forest_classifier
+    - extra_trees_classifier
+    - xgboost_classifier
+    - lightgbm_classifier
+    - svm_rbf_classifier
+
+  multitask_strategy: one_model_per_kinase
+  pairwise_strategy: direct_pair_regression
+  target_vs_panel_strategy: direct_regression
+
+  save_trained_models: true
+  save_feature_tables: true
+  save_fold_predictions: true
+  save_test_predictions: true
+  save_error_tables: true
+  save_config_snapshot: true
+
+  make_figures: true
+  export_svg: true
+  export_png: true
+  export_pdf: true
+
+  figure_style:
+    font_family: Times New Roman
+    bold_text: true
+    output_format_primary: svg
+    palette_name: nature_manuscript_palette
+    dpi_png: 300
+
+  tuning:
+    use_small_grid_search: true
+    cv_folds_inner: 3
+

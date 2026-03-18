@@ -446,3 +446,100 @@ Top-level outputs:
 - Selected grouping columns, split counts, missing-metadata warnings, and subset coverage summaries are recorded in the JSON report.
 - The exact config used for the run is copied to `configs_used/` when enabled.
 - This step defines splits and subset manifests only and does not fit or evaluate any model.
+
+---
+
+## Script-07: Train classical baseline benchmark models
+
+### Purpose
+Script-07 is the non-causal baseline modeling stage for the kinase causal-QSAR benchmark. It trains reproducible classical machine-learning baselines for the Step-05 benchmark tasks using the deterministic split definitions exported by Script-06. These outputs are intended as strong reference baselines for later comparison against graph-learning and causal representation-learning models.
+
+### Scientific scope
+Script-07 supports:
+- multitask pKi regression via the default `one_model_per_kinase` strategy
+- pairwise selectivity-margin regression
+- target-vs-panel selectivity regression
+- derived binary classification tasks when label columns are available
+
+These are deliberately **non-causal** baselines.
+
+### Required inputs
+Configured under `script_07` in `config.yaml`:
+- `data/processed/task_multitask_regression_long.csv`
+- `data/processed/task_pairwise_selectivity_regression.csv`
+- `data/processed/task_target_vs_panel_selectivity.csv`
+- `data/processed/task_derived_classification_labels.csv`
+- `data/splits/split_manifest.csv`
+- row-level split assignment files written by Script-06 and referenced in the manifest
+
+### Descriptor generation
+Script-07 uses compound-centric classical descriptors derived from `standardized_smiles`:
+- Morgan fingerprints
+- RDKit 2D descriptors
+- optional environment / provenance categorical features when enabled in config
+
+Descriptor tables are generated once per unique compound, saved when configured, and reused across task assemblies.
+
+### Models trained
+Regression baselines:
+- Ridge regression
+- Random Forest Regressor
+- Extra Trees Regressor
+- XGBoost Regressor (if installed)
+- LightGBM Regressor (if installed)
+- SVR with RBF kernel
+
+Classification baselines:
+- Logistic Regression
+- Random Forest Classifier
+- Extra Trees Classifier
+- XGBoost Classifier (if installed)
+- LightGBM Classifier (if installed)
+- SVC with RBF kernel
+
+Script-07 applies deterministic random seeds, uses scaling where appropriate, and supports a small reproducible inner-grid search when enabled.
+
+### Split strategies supported
+Script-07 consumes the split strategies defined by Script-06, including:
+- random seeded holdout splits
+- scaffold holdout splits
+- kinase-family grouped holdout splits
+- source/environment grouped holdout splits
+- any additional manifest-defined holdout variants present in `data/splits/split_manifest.csv`
+
+### Outputs
+Primary output roots:
+- trained models: `models/classical_baselines/`
+- metrics tables: `results/classical_baselines/`
+- row-level predictions: `results/classical_baselines/predictions/`
+- publication figures: `figures/classical_baselines/`
+- JSON run report: `reports/07_classical_baseline_report.json`
+
+Representative metrics outputs:
+- `regression_metrics_per_fold.csv`
+- `regression_metrics_summary.csv`
+- `classification_metrics_per_fold.csv`
+- `classification_metrics_summary.csv`
+- error-analysis tables for hardest compounds / targets when configured
+
+### Figures
+When figure generation is enabled, Script-07 produces manuscript-oriented SVG-first outputs with Times New Roman bold text and a fixed Nature-style palette. Figure source-data CSV files are also exported when applicable.
+
+### Run
+From `Kinase_Causal_QSAR/`:
+```bash
+python scripts/07_train_classical_baseline_models.py
+```
+Optional custom config:
+```bash
+python scripts/07_train_classical_baseline_models.py --config /path/to/config.yaml
+```
+
+### Reproducibility notes
+- All key paths and settings are read from `config.yaml`.
+- Script-07 saves a config snapshot when enabled.
+- Deterministic seeds are fixed across compatible model families.
+- Fold-level metrics and row-level predictions are saved for auditing.
+- Missing required files, columns, or split assignments trigger clear failures.
+- Optional dependencies such as XGBoost and LightGBM are skipped with explicit warnings if unavailable.
+
