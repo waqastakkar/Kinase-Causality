@@ -746,3 +746,84 @@ python scripts/09_train_causal_environment_aware_model.py --config /path/to/conf
 - Graph construction failures, disabled objectives, skipped splits, and other warnings are written to the log and JSON report.
 - Fold-level predictions, metrics, latent embeddings, environment predictions, vocabularies, and model checkpoints can all be saved for full provenance tracking.
 - This step is the central causal modeling contribution of the pipeline and is intended for publication-grade benchmarking and robustness analysis.
+
+## Script-10: Global model comparison, robustness analysis, and interpretation
+
+### Purpose
+
+Script-10 integrates the outputs from Steps 07-09 into a unified evaluation layer for manuscript-ready comparison, robustness analysis, and interpretation. It is an evaluation-only step: it does **not** retrain models.
+
+### Scientific role
+
+This step prepares the evidence layer used for:
+
+- cross-family comparison of classical, deep, and causal models
+- robustness assessment across split regimes
+- activity-cliff sensitivity analysis
+- environment-wise error analysis
+- kinase-level and compound-level interpretation
+- causal ablation interpretation
+- low-data and transfer benchmarking
+- final figure and table selection for publication
+
+### Required inputs (from Steps 07-09 and earlier annotations)
+
+Configured under `script_10` in `config.yaml`:
+
+- `results/classical_baselines/...` and `reports/07_classical_baseline_report.json`
+- `results/deep_baselines/...` and `reports/08_deep_baseline_report.json`
+- `results/causal_models/...` and `reports/09_causal_model_report.json`
+- `data/processed/chembl_human_kinase_panel_annotated_long.csv`
+- optional activity-cliff and environment annotation tables when available
+- `data/splits/split_manifest.csv`
+
+### Main outputs
+
+Script-10 writes integrated comparison artifacts under `results/model_comparison/`, including:
+
+- unified per-fold and summary metric tables for regression and classification
+- best-model selection tables by task and split strategy
+- causal-vs-best-baseline comparison tables
+- activity-cliff degradation summaries
+- environment-group robustness summaries
+- per-kinase, per-compound, and scaffold-level interpretation tables
+- ablation drop and rank summaries
+- low-data and transfer-gap summaries
+- figure source-data tables for reproducible manuscript figures
+
+It also writes figures under `figures/model_comparison/`, a JSON report at `reports/10_model_comparison_and_interpretation_report.json`, a timestamped log under `logs/`, and a config snapshot under `configs_used/`.
+
+### Best-model selection logic
+
+- Regression comparisons use the config-driven primary metric `best_model_selection_metric_regression` (default: `rmse`, lower is better).
+- Classification comparisons use `best_model_selection_metric_classification` (default: `roc_auc`, higher is better).
+- Model ranking is deterministic and performed within task and split context after schema normalization across earlier steps.
+- Causal ablations are compared against the full causal model (`main`) without retraining.
+
+### Activity-cliff and environment analysis
+
+If the required annotations and prediction outputs are available, Script-10 additionally produces:
+
+- activity-cliff vs non-cliff performance tables
+- scaffold-group, kinase-family, and source-environment robustness tables
+- hardest scaffold groups, hardest kinase families, hardest kinases, and hardest compounds
+- per-kinase performance summaries for interpretation and downstream figure preparation
+
+Optional analyses are skipped with explicit logging and warnings in the JSON report when required files are unavailable.
+
+### Run
+
+From the `Kinase_Causal_QSAR` directory:
+
+```bash
+python scripts/10_evaluate_compare_and_interpret_models.py --config config.yaml
+```
+
+### Reproducibility notes
+
+- Script-10 is fully config-driven and deterministic.
+- It saves the exact config snapshot used for the run.
+- It records discovered result files, warnings, and summary conclusions in the final JSON report.
+- It saves figure source data alongside publication-grade figures using the shared Nature-style palette and Times New Roman bold text.
+- It evaluates and compares previously trained models only; it does not modify or retrain earlier model checkpoints.
+
