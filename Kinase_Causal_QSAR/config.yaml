@@ -513,3 +513,82 @@ script_10:
 
   save_source_data_for_figures: true
   save_config_snapshot: true
+
+# Script-11 final manuscript figures, tables, and source-data settings
+script_11:
+  input_model_comparison_root: results/model_comparison
+  input_classical_results_root: results/classical_baselines
+  input_deep_results_root: results/deep_baselines
+  input_causal_results_root: results/causal_models
+
+  output_manuscript_root: manuscript_outputs
+  output_main_figures_root: manuscript_outputs/main_figures
+  output_supplementary_figures_root: manuscript_outputs/supplementary_figures
+  output_main_tables_root: manuscript_outputs/main_tables
+  output_supplementary_tables_root: manuscript_outputs/supplementary_tables
+  output_figure_source_data_root: manuscript_outputs/figure_source_data
+  output_table_source_data_root: manuscript_outputs/table_source_data
+  output_manifest_path: manuscript_outputs/manuscript_asset_manifest.csv
+  output_report_path: reports/11_manuscript_figures_and_tables_report.json
+
+  generate_main_figures: true
+  generate_supplementary_figures: true
+  generate_main_tables: true
+  generate_supplementary_tables: true
+  generate_source_data: true
+
+  export_svg: true
+  export_png: true
+  export_pdf: true
+  png_dpi: 300
+
+  figure_style:
+    font_family: Times New Roman
+    bold_text: true
+    output_format_primary: svg
+    palette_name: nature_manuscript_palette
+    axis_linewidth: 1.2
+    tick_linewidth: 1.2
+    line_width: 2.0
+    marker_size: 6
+    title_fontsize: 14
+    label_fontsize: 12
+    tick_fontsize: 10
+    legend_fontsize: 10
+
+  table_style:
+    save_csv: true
+    save_xlsx: true
+    round_decimals: 3
+
+  figure_plan:
+    main_figures:
+      - overall_model_comparison
+      - split_strategy_robustness
+      - causal_vs_baselines
+      - ablation_summary
+      - activity_cliff_comparison
+      - low_data_learning_curves
+    supplementary_figures:
+      - per_kinase_performance_distribution
+      - environment_group_performance
+      - scaffold_gap_analysis
+      - kinase_family_gap_analysis
+      - additional_scatterplots
+      - additional_classification_curves
+
+  table_plan:
+    main_tables:
+      - overall_model_ranking
+      - best_models_by_task
+      - ablation_effect_summary
+      - activity_cliff_summary
+    supplementary_tables:
+      - detailed_regression_metrics
+      - detailed_classification_metrics
+      - environment_group_metrics
+      - per_kinase_metrics
+      - low_data_metrics
+      - transfer_gap_metrics
+
+  save_config_snapshot: true

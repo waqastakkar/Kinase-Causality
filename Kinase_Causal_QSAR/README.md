@@ -827,3 +827,107 @@ python scripts/10_evaluate_compare_and_interpret_models.py --config config.yaml
 - It saves figure source data alongside publication-grade figures using the shared Nature-style palette and Times New Roman bold text.
 - It evaluates and compares previously trained models only; it does not modify or retrain earlier model checkpoints.
 
+
+---
+
+## Script-11: Generate final manuscript figures, tables, and source-data assets
+
+### Purpose
+Read the validated benchmarking and interpretation outputs from Steps 07-10 and assemble the final manuscript-ready presentation layer for the kinase causality QSAR study.
+
+This step is strictly presentation-focused:
+- it **does not retrain models**
+- it **does not rerun benchmark evaluation logic unnecessarily**
+- it **does** generate final main figures, supplementary figures, main tables, supplementary tables, source-data CSV files, a manuscript asset manifest, and a JSON report
+
+### Required inputs
+Configured under `script_11` in `config.yaml`.
+
+Primary expected Step-10 inputs include files under `results/model_comparison/`, such as:
+- `unified_regression_metrics_summary.csv`
+- `unified_regression_metrics_per_fold.csv`
+- `unified_classification_metrics_summary.csv`
+- `unified_ablation_metrics_summary.csv`
+- `best_models_by_task.csv`
+- `best_models_by_split_strategy.csv`
+- `activity_cliff_model_comparison.csv`
+- `activity_cliff_degradation_summary.csv`
+- `environment_group_metrics.csv`
+- `per_kinase_performance_summary.csv`
+- `ablation_drop_summary.csv`
+- `low_data_performance_summary.csv`
+- `low_data_learning_curve_source_data.csv`
+- optional transfer-gap and hardest-group summaries when available
+
+Script-11 also records the configured roots for earlier baseline outputs:
+- `results/classical_baselines/`
+- `results/deep_baselines/`
+- `results/causal_models/`
+
+### Run
+From `Kinase_Causal_QSAR/`:
+```bash
+python scripts/11_generate_manuscript_figures_and_tables.py
+```
+Optional custom config:
+```bash
+python scripts/11_generate_manuscript_figures_and_tables.py --config /path/to/config.yaml
+```
+
+### Outputs
+All final manuscript assets are written under `manuscript_outputs/`:
+- Main figures: `manuscript_outputs/main_figures/`
+- Supplementary figures: `manuscript_outputs/supplementary_figures/`
+- Main tables: `manuscript_outputs/main_tables/`
+- Supplementary tables: `manuscript_outputs/supplementary_tables/`
+- Figure source data: `manuscript_outputs/figure_source_data/`
+- Table source data: `manuscript_outputs/table_source_data/`
+- Asset manifest: `manuscript_outputs/manuscript_asset_manifest.csv`
+
+Additional reporting outputs:
+- JSON report: `reports/11_manuscript_figures_and_tables_report.json`
+- Log file: `logs/11_generate_manuscript_figures_and_tables_YYYYMMDDTHHMMSSZ.log`
+- Config snapshot: `configs_used/11_generate_manuscript_figures_and_tables_config.yaml`
+
+### Figure naming conventions
+Main manuscript figures are written with deterministic manuscript-style names such as:
+- `Figure_1.svg`
+- `Figure_2.svg`
+- ...
+
+Supplementary figures use:
+- `Figure_S1.svg`
+- `Figure_S2.svg`
+- ...
+
+If enabled in config, matching `.png` and `.pdf` copies are also written.
+
+### Table naming conventions
+Main manuscript tables use:
+- `Table_1.csv`
+- `Table_2.csv`
+- ...
+
+Supplementary tables use:
+- `Table_S1.csv`
+- `Table_S2.csv`
+- ...
+
+If enabled in config, matching `.xlsx` files are also written.
+
+### Source-data policy
+Script-11 writes source-data files for every generated figure and for derived manuscript tables whenever source-data export is enabled.
+
+Examples:
+- `manuscript_outputs/figure_source_data/Figure_1_source_data.csv`
+- `manuscript_outputs/table_source_data/Table_1_source_data.csv`
+
+These files are intended to reflect the exact transformed values used for plotting or manuscript-table assembly, preserving plotting order and traceability wherever possible.
+
+### Reproducibility and manuscript-style notes
+- Script-11 is fully config-driven through `script_11` in `config.yaml`.
+- The script validates required inputs before generating each required main asset.
+- Missing optional supplementary assets are logged clearly and skipped rather than silently fabricated.
+- Matplotlib styling is explicitly controlled to enforce Times New Roman, bold visible text, deterministic ordering, and a fixed Nature-style palette.
+- The asset manifest maps each figure/table to its output paths, source-data file, and originating upstream files.
+- This step assembles final manuscript assets only and does **not** retrain, resplit, or re-score any model.
