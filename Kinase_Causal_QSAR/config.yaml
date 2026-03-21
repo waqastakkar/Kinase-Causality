@@ -468,3 +468,48 @@ script_09:
     output_format_primary: svg
     palette_name: nature_manuscript_palette
     dpi_png: 300
+
+# Script-10 model comparison, robustness analysis, and interpretation settings
+script_10:
+  input_classical_results_root: results/classical_baselines
+  input_deep_results_root: results/deep_baselines
+  input_causal_results_root: results/causal_models
+
+  input_annotated_long_path: data/processed/chembl_human_kinase_panel_annotated_long.csv
+  input_activity_cliff_path: data/processed/activity_cliff_annotations.csv
+  input_kinase_env_path: data/processed/kinase_environment_annotations.csv
+  input_compound_env_path: data/processed/compound_environment_annotations.csv
+  input_split_manifest_path: data/splits/split_manifest.csv
+
+  output_results_root: results/model_comparison
+  output_figures_root: figures/model_comparison
+  output_report_path: reports/10_model_comparison_and_interpretation_report.json
+
+  compare_regression_tasks: true
+  compare_classification_tasks: true
+  compare_split_strategies: true
+  compare_low_data_subsets: true
+  compare_activity_cliff_performance: true
+  compare_environment_group_performance: true
+  compare_ablations: true
+
+  best_model_selection_metric_regression: rmse
+  best_model_selection_metric_classification: roc_auc
+
+  aggregate_across_folds: true
+  aggregate_across_split_ids: true
+
+  make_figures: true
+  export_svg: true
+  export_png: true
+  export_pdf: true
+
+  figure_style:
+    font_family: Times New Roman
+    bold_text: true
+    output_format_primary: svg
+    palette_name: nature_manuscript_palette
+    dpi_png: 300
+
+  save_source_data_for_figures: true
+  save_config_snapshot: true
