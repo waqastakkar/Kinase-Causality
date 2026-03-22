@@ -767,3 +767,56 @@ script_13b:
 
   save_failed_rows: true
   save_config_snapshot: true
+
+
+# Script-13C screening model scoring settings
+script_13c:
+  input_classical_feature_path: screening_features/screening_classical_features.csv
+  input_graph_manifest_path: screening_features/screening_graph_input_manifest.csv
+  input_environment_feature_path: screening_features/screening_environment_features.csv
+  input_feature_manifest_path: screening_features/screening_feature_manifest.csv
+
+  input_best_models_by_task_path: results/model_comparison/best_models_by_task.csv
+  input_best_models_by_split_strategy_path: results/model_comparison/best_models_by_split_strategy.csv
+
+  classical_model_root: models/classical_baselines
+  deep_model_root: models/deep_baselines
+  causal_model_root: models/causal_models
+
+  output_scoring_root: screening_scores
+  output_classical_scores_path: screening_scores/classical_screening_scores.csv
+  output_deep_scores_path: screening_scores/deep_screening_scores.csv
+  output_causal_scores_path: screening_scores/causal_screening_scores.csv
+  output_unified_scores_path: screening_scores/unified_screening_scores.csv
+  output_manifest_path: screening_scores/screening_score_manifest.csv
+  output_report_path: reports/13c_screening_model_scoring_report.json
+
+  score_with_classical_models: true
+  score_with_deep_models: true
+  score_with_causal_models: true
+
+  scoring_tasks:
+    multitask_regression: true
+    target_vs_panel_regression: true
+    pairwise_selectivity_regression: false
+
+  target_selection_mode: explicit_list
+  target_chembl_ids:
+    - CHEMBLxxxx
+    - CHEMBLyyyy
+
+  use_best_model_per_task: true
+  use_best_model_per_split_strategy: false
+  include_supporting_models: true
+  max_supporting_models_per_family: 3
+
+  save_raw_predictions: true
+  save_wide_prediction_tables: true
+  save_long_prediction_tables: true
+  save_model_metadata_table: true
+  save_failed_rows: true
+  save_config_snapshot: true
+
+  device: auto
+  batch_size: 128
+  num_workers: 4

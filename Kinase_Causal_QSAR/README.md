@@ -1272,3 +1272,62 @@ Optional provenance / reproducibility outputs:
 - The script preserves the exact mapping between `screening_compound_id`, `standardized_smiles`, and downstream feature assets.
 - Config snapshots, detailed logs, manifest entries, QC summaries, and a machine-readable JSON report are written for provenance tracking.
 - This step prepares inference-ready features only and does **not** perform model scoring, ranking, or final applicability-domain scoring.
+
+
+---
+
+## Script-13C: Score the screening library with trained models
+
+### Purpose
+Script-13C is the scoring layer for screening inference. It consumes the inference-ready screening assets produced by Script-13B, resolves the best trained models from Steps 07-10, and writes provenance-rich raw prediction tables for downstream consensus scoring, uncertainty estimation, applicability-aware prioritization, strategic ranking, and final shortlist generation. This step generates **raw model scores only**; it does **not** perform final ranking, uncertainty aggregation, applicability scoring, or shortlist bucketing.
+
+### Required inputs
+Configured under `script_13c` in `config.yaml`:
+- `screening_features/screening_classical_features.csv`
+- `screening_features/screening_graph_input_manifest.csv`
+- `screening_features/screening_environment_features.csv`
+- `screening_features/screening_feature_manifest.csv`
+- `results/model_comparison/best_models_by_task.csv` and/or `results/model_comparison/best_models_by_split_strategy.csv`
+- trained model artifacts under `models/classical_baselines/`, `models/deep_baselines/`, and `models/causal_models/`
+
+Script-13C validates that the Step-13B screening feature files exist, contain `screening_compound_id` plus `standardized_smiles`, and that selected model artifacts can be traced back to the configured model roots or explicit artifact paths in the model-selection tables.
+
+### Supported task types
+- `multitask_regression`: target potency scoring as predicted `pKi`
+- `target_vs_panel_regression`: selectivity-oriented scoring as predicted target-vs-panel delta `pKi`
+- `pairwise_selectivity_regression`: optional and configuration-gated; requires explicit pair-aware metadata before it can run safely
+
+### Target selection behavior
+`script_13c.target_selection_mode` controls how targets are expanded during inference. The default `explicit_list` mode replicates the screening library over the configured `target_chembl_ids`, ensuring one prediction row per compound-target combination for each selected model/task combination.
+
+### Outputs
+Script-13C writes structured screening outputs under `screening_scores/` and `reports/`, including:
+- `screening_scores/classical_screening_scores.csv`
+- `screening_scores/deep_screening_scores.csv`
+- `screening_scores/causal_screening_scores.csv`
+- `screening_scores/unified_screening_scores.csv`
+- `screening_scores/unified_screening_scores_wide.csv`
+- `screening_scores/screening_model_metadata.csv`
+- `screening_scores/screening_scoring_qc_summary.csv`
+- `screening_scores/screening_score_manifest.csv`
+- failed-row tables for each enabled model family
+- `reports/13c_screening_model_scoring_report.json`
+
+Every prediction row preserves core provenance such as compound identifiers, target identifiers, task name, model family, model name, artifact path, split strategy used for model selection, and prediction value type.
+
+### Run
+From `Kinase_Causal_QSAR/`:
+```bash
+python scripts/13c_score_screening_library_with_trained_models.py
+```
+Optional custom config:
+```bash
+python scripts/13c_score_screening_library_with_trained_models.py --config /path/to/config.yaml
+```
+
+### Reproducibility notes
+- Script-13C is fully config-driven and saves an exact config snapshot under `configs_used/` when enabled.
+- Outputs are deterministically sorted to preserve stable compound-target-model row ordering.
+- The JSON report records the screening feature files, model roots, model-selection tables, task/target coverage, failed-row counts, warnings, and config snapshot reference.
+- Classical screening requires exact feature-schema alignment with the saved training artifact metadata.
+- Deep and causal screening intentionally require traceable inference artifacts or reconstructable inference bundles; the script fails clearly if only an opaque state dict is available and reproducible inference cannot be validated.
