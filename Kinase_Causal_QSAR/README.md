@@ -931,3 +931,77 @@ These files are intended to reflect the exact transformed values used for plotti
 - Matplotlib styling is explicitly controlled to enforce Times New Roman, bold visible text, deterministic ordering, and a fixed Nature-style palette.
 - The asset manifest maps each figure/table to its output paths, source-data file, and originating upstream files.
 - This step assembles final manuscript assets only and does **not** retrain, resplit, or re-score any model.
+
+---
+
+## Script-12: Package reproducibility and release bundle
+
+### Purpose
+Read the validated outputs from Steps 01-11 and assemble the final reproducibility, release, and archival package for the kinase causality QSAR study.
+
+This step is packaging-focused:
+- it **does not retrain models**
+- it **does not rerun evaluation or regenerate benchmark results unnecessarily**
+- it **does** validate required assets, mirror selected outputs into a deterministic release structure, generate a release manifest, write checksums and environment snapshots, and optionally create compressed archives
+
+### Required inputs
+Configured under `script_12` in `config.yaml`.
+
+Expected upstream roots may include:
+- `data/`
+- `models/`
+- `results/`
+- `figures/`
+- `manuscript_outputs/`
+- `reports/`
+- `logs/`
+- `configs_used/`
+- `README.md`
+- optional dependency files such as `requirements.txt`, `environment.yml`, `pyproject.toml`, and `setup.cfg` when present
+
+Script-12 validates the configured `required_assets` before packaging and fails clearly when mandatory reproducibility assets are missing.
+
+### Run
+From `Kinase_Causal_QSAR/`:
+```bash
+python scripts/12_package_reproducibility_and_release.py
+```
+Optional custom config:
+```bash
+python scripts/12_package_reproducibility_and_release.py --config /path/to/config.yaml
+```
+
+### Outputs
+Primary release bundle outputs:
+- Release root: `release_package/`
+- Release manifest: `release_package/release_manifest.csv`
+- Checksum file: `release_package/checksums.txt`
+- Environment snapshot: `release_package/environment_snapshot.txt`
+- Directory tree snapshot: `release_package/directory_tree.txt`
+- Release README: `release_package/README_RELEASE.md`
+- Runbook: `release_package/RUNBOOK.md`
+
+Additional reporting outputs:
+- JSON report: `reports/12_reproducibility_and_release_report.json`
+- Log file: `logs/12_package_reproducibility_and_release_YYYYMMDDTHHMMSSZ.log`
+- Config snapshot: `configs_used/12_package_reproducibility_and_release_config.yaml`
+
+Optional archive outputs when enabled:
+- `release_archives/kinase_causality_qsar_release.tar.gz`
+- `release_archives/kinase_causality_qsar_release.zip`
+
+### Release-package contents
+The release bundle mirrors selected project outputs into a deterministic handoff structure, including:
+- `data/raw/`, `data/interim/`, `data/processed/`, and `data/splits/`
+- `models/` for trained baseline and causal models
+- `results/` for benchmark summaries and comparison outputs
+- `figures/` for publication-grade benchmarking figures
+- `manuscript_outputs/` for final manuscript figures, tables, and source-data assets
+- `reports/`, `logs/`, and `configs_used/` for provenance and auditability
+
+### Reproducibility notes
+- Script-12 is fully config-driven through `script_12` in `config.yaml`.
+- The script uses deterministic file discovery, manifest ordering, checksum ordering, and directory-tree generation.
+- It records the exact config used, a packaging log, an environment snapshot, and a machine-readable asset manifest.
+- It packages existing project outputs only and does **not** rerun scientific modeling stages.
+
