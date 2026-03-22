@@ -637,3 +637,74 @@ script_12:
 
   save_config_snapshot: true
 
+# Script-13A screening library preparation settings
+script_13a:
+  input_libraries:
+    - name: screening_lib_1
+      path: screening_input/library1.csv
+      file_type: csv
+      smiles_column_candidates:
+        - smiles
+        - SMILES
+        - canonical_smiles
+        - standardized_smiles
+      compound_id_column_candidates:
+        - compound_id
+        - molecule_id
+        - catalog_id
+        - ID
+      extra_metadata_columns:
+        - source
+        - vendor
+        - library
+        - price
+        - stock
+    - name: screening_lib_2
+      path: screening_input/library2.smi
+      file_type: smi
+      smiles_column_candidates:
+        - smiles
+        - SMILES
+      compound_id_column_candidates:
+        - compound_id
+        - ID
+      extra_metadata_columns: []
+
+  output_library_root: screening_prepared
+  output_cleaned_root: screening_prepared/cleaned_libraries
+  output_merged_library_path: screening_prepared/merged_screening_library.csv
+  output_provenance_path: screening_prepared/screening_library_provenance.csv
+  output_duplicate_summary_path: screening_prepared/screening_duplicate_summary.csv
+  output_qc_summary_path: screening_prepared/screening_qc_summary.csv
+  output_manifest_path: screening_prepared/screening_library_manifest.csv
+  output_report_path: reports/13a_screening_library_preparation_report.json
+
+  standardization:
+    remove_salts: true
+    keep_largest_fragment: true
+    normalize_molecules: true
+    canonicalize_smiles: true
+    neutralize_if_possible: false
+    preserve_original_smiles: true
+
+  filtering:
+    remove_invalid_smiles: true
+    remove_mixtures: true
+    remove_inorganic: true
+    remove_empty_smiles: true
+    remove_duplicates_within_library: true
+    remove_duplicates_across_libraries: false
+    min_heavy_atoms: 5
+    max_molecular_weight: 1000.0
+    min_molecular_weight: 80.0
+
+  provenance:
+    track_input_library_name: true
+    track_original_row_index: true
+    track_original_compound_id: true
+    track_original_smiles: true
+    track_source_file_path: true
+
+  save_library_specific_outputs: true
+  save_failed_rows: true
+  save_config_snapshot: true
