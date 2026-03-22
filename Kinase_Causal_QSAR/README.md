@@ -1005,3 +1005,120 @@ The release bundle mirrors selected project outputs into a deterministic handoff
 - It records the exact config used, a packaging log, an environment snapshot, and a machine-readable asset manifest.
 - It packages existing project outputs only and does **not** rerun scientific modeling stages.
 
+---
+
+## Script-13A: Prepare and standardize screening libraries
+
+### Purpose
+Prepare one or more external or prospective screening libraries for the downstream strategic screening workflow.
+
+This step is preparation-focused:
+- it **does standardize and validate raw screening compounds**
+- it **does preserve provenance and duplicate traceability**
+- it **does write merged, library-specific, QC, manifest, and report assets**
+- it **does not score compounds**
+- it **does not rank compounds**
+- it **does not retrain models**
+
+### Supported input file types
+Configured under `script_13a` in `config.yaml`.
+
+Supported library formats include:
+- `.csv`
+- `.tsv`
+- `.txt`
+- `.smi` / SMILES flat files
+- gzipped flat files when the configured path ends in `.gz`
+- `.parquet` when pandas parquet support is available
+
+The script can process multiple screening libraries in one run and resolves the configured file type and delimiter deterministically.
+
+### Required and optional columns
+Each configured input library must provide at least one usable SMILES column.
+
+Column resolution is config-driven and uses candidate lists in priority order:
+- `smiles_column_candidates`
+- `compound_id_column_candidates`
+- `extra_metadata_columns`
+
+Typical supported fields include:
+- SMILES-like columns such as `smiles`, `SMILES`, `canonical_smiles`, or `standardized_smiles`
+- identifier columns such as `compound_id`, `molecule_id`, `catalog_id`, or `ID`
+- optional metadata such as vendor/source/library names, price, stock, catalog annotations, and other supplier fields
+
+If no compound identifier column is found, the script generates deterministic library-local identifiers of the form:
+- `<library_name>__row_<row_number>`
+
+If no SMILES column can be resolved for a library, the script fails clearly rather than guessing silently.
+
+### Run
+From `Kinase_Causal_QSAR/`:
+```bash
+python scripts/13a_prepare_and_standardize_screening_libraries.py
+```
+Optional custom config:
+```bash
+python scripts/13a_prepare_and_standardize_screening_libraries.py --config /path/to/config.yaml
+```
+
+### Standardization and filtering behavior
+Script-13A uses RDKit for deterministic screening-library preparation:
+- parses raw SMILES
+- removes invalid or empty structures when configured
+- standardizes structures with configurable salt removal, largest-fragment retention, normalization, canonicalization, and optional neutralization
+- computes simple chemistry QC fields including molecular weight and heavy-atom counts
+- filters mixtures, inorganic compounds, out-of-range molecular weights, and overly small fragment-like structures when configured
+
+All removed rows can be written to library-specific failed-row outputs with explicit removal reasons.
+
+### Duplicate handling policy
+Duplicate handling is implemented at two levels:
+
+1. **Within-library duplicates**
+   - detected on `standardized_smiles`
+   - flagged for every duplicate group
+   - optionally collapsed to a single retained row when `remove_duplicates_within_library: true`
+   - collapsed provenance is preserved through retained-row lineage fields and the provenance table
+
+2. **Across-library duplicates**
+   - detected on `standardized_smiles` across all retained libraries
+   - annotated with duplicate flags, row counts, and the number of source libraries containing the structure
+   - **not removed by default**
+   - only collapsed across libraries when `remove_duplicates_across_libraries: true`
+
+This policy preserves shortlist traceability while avoiding silent loss of sourcing information.
+
+### Provenance tracking policy
+For each retained screening compound, Script-13A records:
+- source library name
+- source file path
+- original row index
+- original compound ID
+- original SMILES
+- retained standardized SMILES
+- within-library duplicate group size
+- cross-library duplicate annotations
+
+The provenance table is designed so each retained screening compound can be traced back to the original source row(s) that produced it.
+
+### Outputs
+Primary screening-preparation outputs:
+- merged screening library: `screening_prepared/merged_screening_library.csv`
+- provenance table: `screening_prepared/screening_library_provenance.csv`
+- duplicate summary: `screening_prepared/screening_duplicate_summary.csv`
+- QC summary: `screening_prepared/screening_qc_summary.csv`
+- manifest: `screening_prepared/screening_library_manifest.csv`
+- JSON report: `reports/13a_screening_library_preparation_report.json`
+
+Optional library-specific outputs when enabled:
+- cleaned per-library tables in `screening_prepared/cleaned_libraries/`
+- failed-row tables in `screening_prepared/cleaned_libraries/`
+- config snapshot in `configs_used/13a_prepare_and_standardize_screening_libraries_config.yaml`
+- timestamped log file in `logs/`
+
+### Reproducibility notes
+- Script-13A is fully config-driven through `script_13a` in `config.yaml`.
+- Input-library ordering, duplicate retention, output ordering, and manifest generation are deterministic.
+- The script records a config snapshot, structured outputs, a machine-readable report, and detailed logging for auditability.
+- Removed rows are not silently discarded; they are counted, annotated, and optionally exported with explicit failure reasons.
+- This step prepares screening libraries only and does **not** perform screening inference, uncertainty estimation, ranking, or shortlist generation.
