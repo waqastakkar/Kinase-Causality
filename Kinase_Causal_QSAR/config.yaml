@@ -592,3 +592,48 @@ script_11:
       - transfer_gap_metrics
 
   save_config_snapshot: true
+
+# Script-12 reproducibility, release, and archival packaging settings
+script_12:
+  project_root: .
+  output_release_root: release_package
+  output_archive_root: release_archives
+  output_manifest_path: release_package/release_manifest.csv
+  output_report_path: reports/12_reproducibility_and_release_report.json
+  output_release_readme_path: release_package/README_RELEASE.md
+  output_runbook_path: release_package/RUNBOOK.md
+  output_environment_snapshot_path: release_package/environment_snapshot.txt
+  output_directory_tree_path: release_package/directory_tree.txt
+
+  include_raw_data: true
+  include_interim_data: true
+  include_processed_data: true
+  include_models: true
+  include_results: true
+  include_figures: true
+  include_manuscript_outputs: true
+  include_reports: true
+  include_logs: true
+  include_configs_used: true
+
+  validate_required_assets: true
+  generate_checksums: true
+  checksum_algorithm: sha256
+
+  create_tar_gz: true
+  create_zip: false
+
+  required_assets:
+    - manuscript_outputs/manuscript_asset_manifest.csv
+    - reports/10_model_comparison_and_interpretation_report.json
+    - reports/11_manuscript_figures_and_tables_report.json
+    - README.md
+
+  optional_environment_files:
+    - requirements.txt
+    - environment.yml
+    - pyproject.toml
+    - setup.cfg
+
+  save_config_snapshot: true
+
