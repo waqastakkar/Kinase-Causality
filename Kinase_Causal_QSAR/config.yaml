@@ -708,3 +708,62 @@ script_13a:
   save_library_specific_outputs: true
   save_failed_rows: true
   save_config_snapshot: true
+
+
+# Script-13B screening feature-space mapping settings
+script_13b:
+  input_screening_library_path: screening_prepared/merged_screening_library.csv
+
+  input_step07_config_path: configs_used/07_train_classical_baseline_models_config.yaml
+  input_step08_config_path: configs_used/08_train_graph_and_deep_baseline_models_config.yaml
+  input_step09_config_path: configs_used/09_train_causal_environment_aware_model_config.yaml
+
+  input_training_annotated_long_path: data/processed/chembl_human_kinase_panel_annotated_long.csv
+  input_compound_env_path: data/processed/compound_environment_annotations.csv
+  input_kinase_env_path: data/processed/kinase_environment_annotations.csv
+
+  output_feature_root: screening_features
+  output_classical_feature_path: screening_features/screening_classical_features.csv
+  output_graph_manifest_path: screening_features/screening_graph_input_manifest.csv
+  output_environment_feature_path: screening_features/screening_environment_features.csv
+  output_feature_qc_summary_path: screening_features/screening_feature_qc_summary.csv
+  output_manifest_path: screening_features/screening_feature_manifest.csv
+  output_report_path: reports/13b_screening_feature_mapping_report.json
+
+  generate_classical_features: true
+  generate_graph_inputs: true
+  generate_environment_features: true
+  generate_applicability_reference_features: true
+
+  classical_features:
+    use_morgan_fingerprints: true
+    morgan_radius: 2
+    morgan_nbits: 2048
+    include_rdkit_2d_descriptors: true
+
+  graph_features:
+    use_atom_type: true
+    use_degree: true
+    use_formal_charge: true
+    use_hybridization: true
+    use_aromaticity: true
+    use_num_hs: true
+    use_chirality: true
+    use_bond_type: true
+    use_conjugation: true
+    use_ring_status: true
+    use_stereo: true
+
+  environment_features:
+    compute_murcko_scaffolds: true
+    compute_generic_murcko_scaffolds: true
+    map_kinase_family_vocabularies: false
+    preserve_source_library_metadata: true
+
+  applicability_reference:
+    compare_to_training_compounds: true
+    compute_basic_distance_proxies: true
+    save_training_feature_reference_summary: true
+
+  save_failed_rows: true
+  save_config_snapshot: true
