@@ -498,6 +498,34 @@ def ensure_assignment_columns(df: pd.DataFrame, task_name: str) -> None:
         raise ValueError(f"Assignment file for {task_name} missing columns: {', '.join(missing)}")
 
 
+def build_row_uid(task_name: str, row: pd.Series, row_index: int) -> str:
+    if task_name == "pairwise_selectivity":
+        return "|".join(
+            [
+                task_name,
+                str(row["compound_id"]),
+                str(row.get("kinase_a_chembl_id", "NA")),
+                str(row.get("kinase_b_chembl_id", "NA")),
+                str(row_index),
+            ]
+        )
+    if task_name == CLASSIFICATION_TASK_NAME:
+        return "|".join([task_name, str(row["compound_id"]), str(row.get("target_chembl_id", "NA")), str(row_index)])
+    return "|".join([task_name, str(row["compound_id"]), str(row.get("target_chembl_id", "NA")), str(row_index)])
+
+
+def ensure_row_uid(df: pd.DataFrame, task_name: str) -> pd.DataFrame:
+    if "row_uid" in df.columns:
+        return df
+    logging.warning(
+        "%s task table does not contain `row_uid`; regenerating deterministic identifiers from Step-06 conventions.",
+        task_name,
+    )
+    normalized = df.reset_index(drop=True).copy()
+    normalized["row_uid"] = [build_row_uid(task_name, row, idx) for idx, row in normalized.iterrows()]
+    return normalized
+
+
 def task_enabled(task_name: str, cfg: AppConfig) -> bool:
     return {
         "multitask_regression": cfg.run_multitask_regression,
@@ -510,8 +538,7 @@ def task_enabled(task_name: str, cfg: AppConfig) -> bool:
 def load_task_table(task_name: str, cfg: AppConfig) -> TaskContext | list[TaskContext]:
     if task_name == "classification":
         df = normalize_common_columns(load_required_dataframe(cfg.input_classification_path, "classification task table"))
-        if "row_uid" not in df.columns:
-            raise ValueError("Classification task table must contain `row_uid` from Step-05/06.")
+        df = ensure_row_uid(df, task_name)
         outputs: list[TaskContext] = []
         for label in CLASSIFICATION_LABEL_PRIORITY:
             if label in df.columns and df[label].notna().sum() > 0:
@@ -527,8 +554,7 @@ def load_task_table(task_name: str, cfg: AppConfig) -> TaskContext | list[TaskCo
     spec = REGRESSION_TASKS[task_name]
     input_path = getattr(cfg, spec["config_key"])
     df = normalize_common_columns(load_required_dataframe(input_path, f"{task_name} task table"))
-    if "row_uid" not in df.columns:
-        raise ValueError(f"{task_name} task table must contain `row_uid` from Step-05/06.")
+    df = ensure_row_uid(df, task_name)
     ensure_columns(df, spec["required_columns"] + ["row_uid", "compound_id"], f"{task_name} task table")
     df[spec["label_column"]] = pd.to_numeric(df[spec["label_column"]], errors="coerce")
     df = df[df[spec["label_column"]].notna()].copy()
