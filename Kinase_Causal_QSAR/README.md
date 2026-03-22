@@ -1122,3 +1122,153 @@ Optional library-specific outputs when enabled:
 - The script records a config snapshot, structured outputs, a machine-readable report, and detailed logging for auditability.
 - Removed rows are not silently discarded; they are counted, annotated, and optionally exported with explicit failure reasons.
 - This step prepares screening libraries only and does **not** perform screening inference, uncertainty estimation, ranking, or shortlist generation.
+
+
+---
+
+## Script-13B: Map screening library to model feature space
+
+### Purpose
+Map the standardized screening library from Script-13A into deterministic, inference-ready feature spaces that remain aligned with the trained classical, deep/graph, and causal models.
+
+This step is representation-focused:
+- it **does generate classical descriptor and fingerprint tables**
+- it **does generate graph/deep-model manifests and graph metadata**
+- it **does generate environment-style causal covariates and applicability-reference assets**
+- it **does validate feature-space consistency against training-time expectations when available**
+- it **does not score compounds**
+- it **does not rank compounds**
+- it **does not retrain any model**
+
+### Required inputs
+Configured under `script_13b` in `config.yaml`.
+
+Primary required input from Script-13A:
+- `screening_prepared/merged_screening_library.csv`
+
+Expected required columns in the prepared screening library:
+- `screening_compound_id`
+- `standardized_smiles`
+
+Optional but strongly recommended training-time references:
+- `configs_used/07_train_classical_baseline_models_config.yaml`
+- `configs_used/08_train_graph_and_deep_baseline_models_config.yaml`
+- `configs_used/09_train_causal_environment_aware_model_config.yaml`
+- processed training data such as `data/processed/chembl_human_kinase_panel_annotated_long.csv`
+- compound / kinase environment annotations from earlier pipeline steps
+- previously saved descriptor tables or model feature tables when available
+
+If prior config snapshots cannot be loaded, Script-13B falls back to the `script_13b` section of the current config and records that fallback in logs and the JSON report.
+
+### Run
+From `Kinase_Causal_QSAR/`:
+```bash
+python scripts/13b_map_screening_library_to_model_feature_space.py
+```
+Optional custom config:
+```bash
+python scripts/13b_map_screening_library_to_model_feature_space.py --config /path/to/config.yaml
+```
+
+### Classical feature generation
+When `generate_classical_features: true`, Script-13B computes one deterministic feature row per unique `screening_compound_id` using `standardized_smiles`:
+- Morgan fingerprints with config-driven radius and bit-length
+- RDKit 2D descriptors with deterministic `rdkit_<descriptor_name>` column names
+- `rdkit_parse_success` as an audit / QC sentinel
+- optional provenance metadata from Script-13A when configured
+
+Where a training-time classical schema can be resolved from prior outputs, the screening feature table is aligned to that schema and the script fails clearly if required feature columns are missing.
+
+Primary output:
+- `screening_features/screening_classical_features.csv`
+
+Optional failed-row output:
+- `screening_features/failed_classical_feature_rows.csv`
+
+### Graph / deep-model input preparation
+When `generate_graph_inputs: true`, Script-13B prepares a graph-ready manifest consistent with Script-08 feature definitions:
+- parses `standardized_smiles` with RDKit
+- checks the configured atom and bond feature switches
+- records graph construction success/failure per compound
+- records `number_of_atoms`, `number_of_bonds`, node feature dimensionality, and edge feature dimensionality
+- writes a lightweight manifest instead of forcing binary graph serialization
+
+Primary output:
+- `screening_features/screening_graph_input_manifest.csv`
+
+Optional failed-row output:
+- `screening_features/failed_graph_rows.csv`
+
+### Environment feature generation
+When `generate_environment_features: true`, Script-13B computes environment-like and causal covariates for each screening compound, including:
+- Murcko scaffold
+- generic Murcko scaffold
+- molecular weight
+- cLogP
+- TPSA
+- H-bond donor count
+- H-bond acceptor count
+- rotatable bond count
+- heavy atom count
+- aromatic ring count
+- formal charge
+- fraction Csp3
+
+The environment table also preserves available screening-library provenance metadata and can optionally cross-reference earlier environment annotations.
+
+Primary output:
+- `screening_features/screening_environment_features.csv`
+
+Optional failed-row output:
+- `screening_features/failed_environment_feature_rows.csv`
+
+### Feature-space consistency checks
+Script-13B writes explicit feature QC diagnostics to prevent silent inference breakage. At minimum it checks:
+- classical fingerprint dimensionality
+- RDKit descriptor block availability
+- training-schema alignment when a prior schema is available
+- graph node and edge feature dimensionality consistency
+- required environment-feature availability
+
+Primary QC output:
+- `screening_features/screening_feature_qc_summary.csv`
+
+The QC summary records:
+- `feature_block`
+- `expected_setting`
+- `observed_setting`
+- `match_flag`
+- `severity`
+- `notes`
+
+Critical mismatches raise a hard error so later inference stages do not proceed on an invalid feature space.
+
+### Applicability-reference preparation
+When `generate_applicability_reference_features: true`, Script-13B prepares basis assets for later novelty and applicability analysis without computing final applicability-domain scores:
+- screening-vs-training novelty proxy flags based on standardized SMILES overlap
+- optional training reference summary statistics for later downstream screening scripts
+
+Typical outputs include:
+- `screening_features/screening_applicability_reference_features.csv`
+- `screening_features/training_feature_reference_summary.json`
+
+### Structured outputs
+Core output files:
+- `screening_features/screening_classical_features.csv`
+- `screening_features/screening_graph_input_manifest.csv`
+- `screening_features/screening_environment_features.csv`
+- `screening_features/screening_feature_qc_summary.csv`
+- `screening_features/screening_feature_manifest.csv`
+- `reports/13b_screening_feature_mapping_report.json`
+
+Optional provenance / reproducibility outputs:
+- failed-row tables in `screening_features/`
+- config snapshot in `configs_used/13b_map_screening_library_to_model_feature_space_config.yaml`
+- timestamped log file in `logs/`
+
+### Reproducibility notes
+- Script-13B is fully config-driven through `script_13b` in `config.yaml`.
+- Screening compounds are deterministically ordered by `screening_compound_id` for stable output generation.
+- The script preserves the exact mapping between `screening_compound_id`, `standardized_smiles`, and downstream feature assets.
+- Config snapshots, detailed logs, manifest entries, QC summaries, and a machine-readable JSON report are written for provenance tracking.
+- This step prepares inference-ready features only and does **not** perform model scoring, ranking, or final applicability-domain scoring.
