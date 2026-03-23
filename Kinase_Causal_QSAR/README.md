@@ -1331,3 +1331,98 @@ python scripts/13c_score_screening_library_with_trained_models.py --config /path
 - The JSON report records the screening feature files, model roots, model-selection tables, task/target coverage, failed-row counts, warnings, and config snapshot reference.
 - Classical screening requires exact feature-schema alignment with the saved training artifact metadata.
 - Deep and causal screening intentionally require traceable inference artifacts or reconstructable inference bundles; the script fails clearly if only an opaque state dict is available and reproducible inference cannot be validated.
+
+
+## Step-13D: Strategic screening ranking integration
+
+### Purpose
+Script-13D converts the raw screening predictions from Script-13C into a strategic decision layer for screening. It integrates potency-oriented predictions, selectivity-oriented predictions, cross-family consensus/disagreement summaries, uncertainty proxies, applicability-domain readiness proxies, and diversity-preparatory signals into interpretable ranking tables. This step writes strategic scores only and **does not** create the final shortlist buckets; shortlist generation remains deferred to Step-13E.
+
+### Required inputs
+Configured under `script_13d` in `config.yaml`:
+- Step-13C score files:
+  - `screening_scores/classical_screening_scores.csv`
+  - `screening_scores/deep_screening_scores.csv`
+  - `screening_scores/causal_screening_scores.csv`
+  - `screening_scores/unified_screening_scores.csv`
+- Step-13B feature files:
+  - `screening_features/screening_classical_features.csv`
+  - `screening_features/screening_environment_features.csv`
+  - Step-13B QC/provenance files may be used as supporting references
+- Step-13A screening library file:
+  - `screening_prepared/merged_screening_library.csv`
+- Optional training/applicability references:
+  - `data/processed/chembl_human_kinase_panel_annotated_long.csv`
+  - `data/processed/compound_environment_annotations.csv`
+
+Script-13D validates that the unified Step-13C screening score table exists, contains the required compound/model/task/value columns, and includes at least one potency-like prediction type before ranking begins.
+
+### Strategic score components
+Script-13D resolves score types explicitly and preserves them separately:
+- potency predictions, such as `predicted_pKi`
+- selectivity predictions, such as target-vs-panel delta `pKi` or pairwise delta `pKi`
+- auxiliary prediction types, if present, without silently merging them into the main potency/selectivity channels
+
+For each compound-target entity, the script summarizes each enabled model family using:
+- family mean / median / min / max prediction
+- within-family standard deviation
+- number of contributing models
+
+The composite strategic score can include:
+- potency component
+- selectivity component
+- uncertainty penalty
+- applicability penalty
+- diversity bonus placeholder
+
+Weights, source-family preferences, and normalization behavior are all read from `script_13d` in `config.yaml` and are written back to the ranking outputs/report for full interpretability.
+
+### Uncertainty proxy policy
+Script-13D computes **uncertainty proxies**, not calibrated posterior uncertainty. These proxies can include:
+- cross-model standard deviation
+- cross-family disagreement
+- within-family disagreement
+- disagreement between best causal and best non-causal prediction
+- insufficient-model-support flags
+
+All uncertainty-related outputs are labeled as disagreement/support proxies and should be interpreted as practical prioritization aids rather than formal uncertainty quantification.
+
+### Applicability proxy policy
+Script-13D computes **applicability proxies**, not exact domain certification. Supported proxy signals include:
+- descriptor range violations relative to training references
+- descriptor-distance proxies to the training descriptor distribution
+- scaffold novelty flags relative to training scaffolds
+- physicochemical out-of-range flags
+
+These are intended for triage and auditability. Novelty or range violations must not be interpreted as guaranteed out-of-domain status.
+
+### Output files
+Script-13D writes strategic ranking assets under `screening_rankings/` and `reports/`, including:
+- `screening_rankings/compound_target_strategic_ranking.csv`
+- `screening_rankings/compound_level_strategic_ranking.csv`
+- `screening_rankings/screening_consensus_summary.csv`
+- `screening_rankings/screening_uncertainty_summary.csv`
+- `screening_rankings/screening_applicability_summary.csv`
+- `screening_rankings/screening_ranking_manifest.csv`
+- optional intermediate component tables and failed-row tables when enabled
+- `reports/13d_strategic_screening_ranking_report.json`
+
+The compound-target ranking table preserves component-level raw and normalized values, weight metadata, target-aware ranks, provenance references, and policy notes. The compound-level ranking table rolls up the target-aware outputs to compound-level best/mean strategic scores and supporting summary metrics.
+
+### Run
+From `Kinase_Causal_QSAR/`:
+```bash
+python scripts/13d_build_strategic_screening_rankings.py
+```
+Optional custom config:
+```bash
+python scripts/13d_build_strategic_screening_rankings.py --config /path/to/config.yaml
+```
+
+### Reproducibility notes
+- Script-13D is fully config-driven through `script_13d` in `config.yaml`.
+- Deterministic sorting/ranking is used to stabilize output ordering and ranking ties.
+- The exact config can be snapshotted under `configs_used/` when enabled.
+- Ranking outputs preserve the mapping from `screening_compound_id` to raw component values, normalized component values, composite weights, and final strategic scores.
+- The JSON report records input paths, component toggles, weight values, warning messages, failed-row counts, uncertainty/applicability summary statistics, and the config snapshot reference.
+- This step produces strategic ranking intelligence for downstream triage but does **not** generate the final shortlist buckets yet.
