@@ -979,3 +979,87 @@ script_13e:
   save_bucket_specific_files: true
   save_target_specific_shortlists: true
   save_config_snapshot: true
+
+# Script-13F screening analysis and visualization settings
+script_13f:
+  input_screening_library_path: screening_prepared/merged_screening_library.csv
+  input_classical_feature_path: screening_features/screening_classical_features.csv
+  input_environment_feature_path: screening_features/screening_environment_features.csv
+  input_unified_scores_path: screening_scores/unified_screening_scores.csv
+  input_compound_target_ranking_path: screening_rankings/compound_target_strategic_ranking.csv
+  input_compound_summary_ranking_path: screening_rankings/compound_level_strategic_ranking.csv
+  input_final_shortlist_path: screening_shortlist/final_screening_shortlist.csv
+  input_shortlist_rationale_path: screening_shortlist/final_shortlist_rationale.csv
+  input_bucket_summary_path: screening_shortlist/shortlist_bucket_summary.csv
+  input_diversity_summary_path: screening_shortlist/shortlist_diversity_summary.csv
+
+  input_training_annotated_long_path: data/processed/chembl_human_kinase_panel_annotated_long.csv
+  input_training_compound_env_path: data/processed/compound_environment_annotations.csv
+
+  output_analysis_root: screening_analysis
+  output_figures_root: screening_analysis/figures
+  output_tables_root: screening_analysis/tables
+  output_source_data_root: screening_analysis/source_data
+  output_manifest_path: screening_analysis/screening_analysis_manifest.csv
+  output_report_path: reports/13f_screening_analysis_report.json
+
+  make_umap: true
+  make_pca: true
+  make_tsne: false
+
+  embedding_input:
+    use_morgan_fingerprints: true
+    fingerprint_radius: 2
+    fingerprint_nbits: 2048
+    fallback_to_rdkit_descriptors: true
+
+  umap_settings:
+    n_neighbors: 25
+    min_dist: 0.15
+    metric: jaccard
+    random_state: 2025
+
+  pca_settings:
+    n_components: 2
+
+  visualization_panels:
+    full_library_map: true
+    shortlist_map: true
+    training_vs_screening_map: true
+    bucket_map: true
+    potency_landscape: true
+    selectivity_landscape: true
+    uncertainty_landscape: true
+    applicability_landscape: true
+    final_score_landscape: true
+    scaffold_diversity_plots: true
+    source_library_plots: true
+    target_specific_panels: true
+
+  target_specific_targets:
+    - CHEMBLxxxx
+    - CHEMBLyyyy
+
+  save_embedding_coordinates: true
+  save_plot_source_data: true
+  save_config_snapshot: true
+
+  export_svg: true
+  export_png: true
+  export_pdf: true
+  png_dpi: 300
+
+  figure_style:
+    font_family: Times New Roman
+    bold_text: true
+    output_format_primary: svg
+    palette_name: nature_manuscript_palette
+    axis_linewidth: 1.2
+    tick_linewidth: 1.2
+    line_width: 2.0
+    marker_size: 12
+    title_fontsize: 14
+    label_fontsize: 12
+    tick_fontsize: 10
+    legend_fontsize: 10
+
