@@ -686,6 +686,39 @@ def prepare_annotation_table(cfg: AppConfig) -> tuple[pd.DataFrame, list[str]]:
     return merged, warnings
 
 
+def harmonize_merge_key_types(left: pd.DataFrame, right: pd.DataFrame, keys: Sequence[str]) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Coerce merge keys to a shared nullable/string-friendly dtype.
+
+    Prediction and annotation tables are assembled from heterogeneous CSV files,
+    so identifier columns such as ``row_uid`` may arrive as ``object`` in one
+    frame and ``float64`` in another when an upstream source contains missing
+    values. Pandas refuses to merge those mixed dtypes directly. We normalize
+    each participating key column to the pandas ``string`` dtype while
+    preserving missing values as ``<NA>``.
+    """
+
+    def normalize_identifier(value: Any) -> Any:
+        if pd.isna(value):
+            return pd.NA
+        if isinstance(value, (np.integer, int)):
+            return str(int(value))
+        if isinstance(value, (np.floating, float)):
+            return str(int(value)) if float(value).is_integer() else str(value)
+        text = str(value).strip()
+        try:
+            numeric = float(text)
+        except ValueError:
+            return text
+        return str(int(numeric)) if numeric.is_integer() else text
+
+    left_aligned = left.copy()
+    right_aligned = right.copy()
+    for key in keys:
+        left_aligned[key] = left_aligned[key].map(normalize_identifier).astype("string")
+        right_aligned[key] = right_aligned[key].map(normalize_identifier).astype("string")
+    return left_aligned, right_aligned
+
+
 def enrich_predictions(predictions: pd.DataFrame, annotations: pd.DataFrame) -> pd.DataFrame:
     if predictions.empty:
         return predictions.copy()
@@ -704,6 +737,7 @@ def enrich_predictions(predictions: pd.DataFrame, annotations: pd.DataFrame) -> 
         if all(key in result.columns for key in keys) and all(key in annotations.columns for key in keys):
             subset_cols = keys + [col for col in remaining_annotation_cols if col in annotations.columns]
             subset = annotations[subset_cols].dropna(how="all", subset=[col for col in subset_cols if col not in keys]).drop_duplicates(subset=keys)
+            result, subset = harmonize_merge_key_types(result, subset, keys)
             result = result.merge(subset, on=keys, how="left")
             remaining_annotation_cols = [col for col in annotations.columns if col not in result.columns]
             if not remaining_annotation_cols:
@@ -1278,7 +1312,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     warnings_list.extend(annotation_warnings)
 
     regression_per_fold_all = pd.concat([normalize_metrics_per_fold(bundle.regression_per_fold, bundle.family, "regression") for bundle in bundles], ignore_index=True)
-    classification_per_fold_all = pd.concat([normalize_metrics_per_fold(bundle.classification_per_fold, bundle.family, "classification") for bundle in bundles], ignore_index=True)
+    classification_frames = [frame for frame in (normalize_metrics_per_fold(bundle.classification_per_fold, bundle.family, "classification") for bundle in bundles) if not frame.empty]
+    classification_per_fold_all = pd.concat(classification_frames, ignore_index=True) if classification_frames else normalize_metrics_per_fold(pd.DataFrame(), "unknown", "classification")
     regression_predictions_all = pd.concat([normalize_predictions(bundle.predictions, bundle.family) for bundle in bundles], ignore_index=True)
     regression_predictions_all = enrich_predictions(regression_predictions_all, annotations)
 
