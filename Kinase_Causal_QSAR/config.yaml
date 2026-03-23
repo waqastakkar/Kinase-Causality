@@ -820,3 +820,82 @@ script_13c:
   device: auto
   batch_size: 128
   num_workers: 4
+
+
+# Script-13D strategic screening ranking settings
+script_13d:
+  input_unified_scores_path: screening_scores/unified_screening_scores.csv
+  input_classical_scores_path: screening_scores/classical_screening_scores.csv
+  input_deep_scores_path: screening_scores/deep_screening_scores.csv
+  input_causal_scores_path: screening_scores/causal_screening_scores.csv
+
+  input_screening_library_path: screening_prepared/merged_screening_library.csv
+  input_classical_feature_path: screening_features/screening_classical_features.csv
+  input_environment_feature_path: screening_features/screening_environment_features.csv
+
+  input_training_annotated_long_path: data/processed/chembl_human_kinase_panel_annotated_long.csv
+  input_compound_env_path: data/processed/compound_environment_annotations.csv
+
+  output_ranking_root: screening_rankings
+  output_compound_target_ranking_path: screening_rankings/compound_target_strategic_ranking.csv
+  output_compound_summary_ranking_path: screening_rankings/compound_level_strategic_ranking.csv
+  output_uncertainty_summary_path: screening_rankings/screening_uncertainty_summary.csv
+  output_applicability_summary_path: screening_rankings/screening_applicability_summary.csv
+  output_consensus_summary_path: screening_rankings/screening_consensus_summary.csv
+  output_manifest_path: screening_rankings/screening_ranking_manifest.csv
+  output_report_path: reports/13d_strategic_screening_ranking_report.json
+
+  ranking_mode: target_aware
+  primary_target_chembl_ids:
+    - CHEMBLxxxx
+    - CHEMBLyyyy
+
+  score_components:
+    use_potency_score: true
+    use_selectivity_score: true
+    use_uncertainty_penalty: true
+    use_applicability_penalty: true
+    use_diversity_bonus_placeholder: true
+
+  score_weights:
+    potency_weight: 1.0
+    selectivity_weight: 1.0
+    uncertainty_penalty_weight: 0.75
+    applicability_penalty_weight: 0.75
+    diversity_bonus_weight: 0.25
+
+  potency_source_preference:
+    - causal
+    - deep
+    - classical
+
+  selectivity_source_preference:
+    - causal
+    - deep
+    - classical
+
+  uncertainty:
+    use_family_disagreement: true
+    use_within_family_disagreement: true
+    use_cross_model_std: true
+    use_top_model_gap: false
+
+  applicability:
+    use_descriptor_distance_proxy: true
+    use_feature_range_violations: true
+    use_scaffold_novelty_flag: true
+    use_out_of_range_physchem_flag: true
+
+  diversity:
+    compute_scaffold_groups: true
+    compute_fingerprint_clusters: false
+    diversity_bonus_is_placeholder_only: true
+
+  normalization:
+    method: robust_rank
+    larger_is_better_for_potency: true
+    larger_is_better_for_selectivity: true
+
+  save_intermediate_component_tables: true
+  save_failed_rows: true
+  save_config_snapshot: true
