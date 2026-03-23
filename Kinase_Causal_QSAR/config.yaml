@@ -899,3 +899,83 @@ script_13d:
   save_intermediate_component_tables: true
   save_failed_rows: true
   save_config_snapshot: true
+
+
+# Script-13E final screening shortlist bucket settings
+script_13e:
+  input_compound_target_ranking_path: screening_rankings/compound_target_strategic_ranking.csv
+  input_compound_summary_ranking_path: screening_rankings/compound_level_strategic_ranking.csv
+  input_uncertainty_summary_path: screening_rankings/screening_uncertainty_summary.csv
+  input_applicability_summary_path: screening_rankings/screening_applicability_summary.csv
+  input_consensus_summary_path: screening_rankings/screening_consensus_summary.csv
+
+  input_screening_library_path: screening_prepared/merged_screening_library.csv
+  input_environment_feature_path: screening_features/screening_environment_features.csv
+  input_provenance_path: screening_prepared/screening_library_provenance.csv
+
+  output_shortlist_root: screening_shortlist
+  output_final_shortlist_path: screening_shortlist/final_screening_shortlist.csv
+  output_shortlist_rationale_path: screening_shortlist/final_shortlist_rationale.csv
+  output_bucket_summary_path: screening_shortlist/shortlist_bucket_summary.csv
+  output_diversity_summary_path: screening_shortlist/shortlist_diversity_summary.csv
+  output_manifest_path: screening_shortlist/screening_shortlist_manifest.csv
+  output_report_path: reports/13e_screening_shortlist_report.json
+
+  shortlist_mode: compound_level
+  primary_target_chembl_ids:
+    - CHEMBLxxxx
+    - CHEMBLyyyy
+
+  total_shortlist_size: 100
+
+  bucket_sizes:
+    high_confidence_selective_hits: 30
+    novel_scaffold_selective_hits: 25
+    diverse_exploratory_hits: 25
+    consensus_supported_fallback_hits: 20
+
+  bucket_rules:
+    high_confidence_selective_hits:
+      require_top_quantile_potency: 0.10
+      require_top_quantile_selectivity: 0.15
+      max_uncertainty_quantile: 0.35
+      max_applicability_penalty_quantile: 0.35
+
+    novel_scaffold_selective_hits:
+      require_scaffold_novelty_flag: true
+      require_top_quantile_selectivity: 0.20
+      max_uncertainty_quantile: 0.50
+      max_applicability_penalty_quantile: 0.50
+
+    diverse_exploratory_hits:
+      require_unique_or_rare_scaffold_preference: true
+      allow_medium_uncertainty: true
+      require_minimum_potency_quantile: 0.35
+
+    consensus_supported_fallback_hits:
+      require_high_model_consensus: true
+      allow_lower_selectivity_than_primary_bucket: true
+      max_uncertainty_quantile: 0.50
+
+  deduplicate_across_buckets: true
+  prioritize_higher_priority_bucket_order:
+    - high_confidence_selective_hits
+    - novel_scaffold_selective_hits
+    - diverse_exploratory_hits
+    - consensus_supported_fallback_hits
+
+  diversity_controls:
+    max_compounds_per_exact_scaffold: 3
+    max_compounds_per_generic_scaffold: 5
+    enforce_scaffold_diversity_within_bucket: true
+    use_fingerprint_diversity_selection: false
+    fingerprint_similarity_threshold: 0.80
+
+  purchasability_controls:
+    prefer_available_vendor_entries: false
+    prefer_non_missing_supplier_metadata: true
+    prefer_in_stock_if_available: false
+
+  save_bucket_specific_files: true
+  save_target_specific_shortlists: true
+  save_config_snapshot: true

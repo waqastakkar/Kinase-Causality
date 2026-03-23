@@ -1426,3 +1426,83 @@ python scripts/13d_build_strategic_screening_rankings.py --config /path/to/confi
 - Ranking outputs preserve the mapping from `screening_compound_id` to raw component values, normalized component values, composite weights, and final strategic scores.
 - The JSON report records input paths, component toggles, weight values, warning messages, failed-row counts, uncertainty/applicability summary statistics, and the config snapshot reference.
 - This step produces strategic ranking intelligence for downstream triage but does **not** generate the final shortlist buckets yet.
+
+
+## Step-13E: Final screening shortlist bucket generation
+
+### Purpose
+Script-13E converts the Step-13D strategic ranking intelligence into the final actionable screening shortlist. It fills explicit shortlist buckets rather than taking a single top-N slice, so the final candidate panel can balance exploitation, novelty, chemical breadth, and consensus-backed fallback coverage for docking, sourcing, synthesis, and manuscript reporting.
+
+### Required inputs
+Configured under `script_13e` in `config.yaml`:
+- Step-13D ranking outputs:
+  - `screening_rankings/compound_target_strategic_ranking.csv`
+  - `screening_rankings/compound_level_strategic_ranking.csv`
+  - `screening_rankings/screening_uncertainty_summary.csv`
+  - `screening_rankings/screening_applicability_summary.csv`
+  - `screening_rankings/screening_consensus_summary.csv`
+- Step-13A/13B metadata:
+  - `screening_prepared/merged_screening_library.csv`
+  - `screening_features/screening_environment_features.csv`
+  - `screening_prepared/screening_library_provenance.csv`
+- Optional purchasability, pricing, stock, or target metadata may be propagated when present in the prepared screening library/provenance tables.
+
+The script fails clearly if the required ranking files or minimum identifier/score columns are missing, or if no final strategic score is available for shortlist construction.
+
+### Supported shortlist modes
+- `compound_level` (default): one final shortlist row per screening compound for purchase or follow-up prioritization.
+- `compound_target`: one final shortlist row per compound-target pair for target-specific screening campaigns.
+
+The mode is resolved entirely from `script_13e.shortlist_mode` in `config.yaml`, and target-aware outputs remain available for primary-target exports when target identifiers are present.
+
+### Bucket definitions
+Script-13E uses explicit config-driven bucket rules and sizes from `script_13e.bucket_rules` and `script_13e.bucket_sizes`:
+- `high_confidence_selective_hits`: exploits the strongest strategic candidates using top-score potency/selectivity support plus low uncertainty/applicability proxy penalties.
+- `novel_scaffold_selective_hits`: preserves scaffold novelty while maintaining selective prioritization.
+- `diverse_exploratory_hits`: broadens chemistry coverage with rare or underrepresented scaffolds instead of only taking the highest global scores.
+- `consensus_supported_fallback_hits`: retains backup candidates with strong cross-model consensus and acceptable proxy-risk profiles.
+
+Eligibility thresholds are applied transparently from config quantiles/flags; Step-13D ranking logic is not recomputed or silently altered.
+
+### Diversity control rules
+- Diversity control is scaffold-based by default and is governed by `script_13e.diversity_controls`.
+- `max_compounds_per_exact_scaffold` and `max_compounds_per_generic_scaffold` cap shortlist concentration within each bucket.
+- When `enforce_scaffold_diversity_within_bucket` is enabled, bucket candidates are filtered deterministically after ranking.
+- If `use_fingerprint_diversity_selection` is `false`, the script logs that only scaffold-based diversity was used.
+
+### Deduplication policy
+- Cross-bucket deduplication is controlled by `script_13e.deduplicate_across_buckets`.
+- Bucket priority order is taken from `script_13e.prioritize_higher_priority_bucket_order`.
+- When enabled, compounds are assigned to the highest-priority bucket they qualify for, and rationale outputs record multi-bucket qualification/deduplication traces.
+- Deterministic sorting and stable tie-breaking preserve reproducible bucket assignments across reruns with the same inputs.
+
+### Output files
+Script-13E writes shortlist assets under `screening_shortlist/` and `reports/`, including:
+- `screening_shortlist/final_screening_shortlist.csv`
+- `screening_shortlist/final_shortlist_rationale.csv`
+- `screening_shortlist/shortlist_bucket_summary.csv`
+- `screening_shortlist/shortlist_diversity_summary.csv`
+- `screening_shortlist/screening_shortlist_manifest.csv`
+- bucket-specific files such as `screening_shortlist/high_confidence_selective_hits.csv` when enabled
+- target-specific shortlist files for configured primary targets when enabled
+- `reports/13e_screening_shortlist_report.json`
+
+The final shortlist preserves bucket assignment, strategic/component scores, scaffold annotations, consensus and proxy metrics, source-library metadata, and provenance-aware sourcing fields where available.
+
+### Run
+From `Kinase_Causal_QSAR/`:
+```bash
+python scripts/13e_generate_screening_shortlist_buckets.py
+```
+Optional custom config:
+```bash
+python scripts/13e_generate_screening_shortlist_buckets.py --config /path/to/config.yaml
+```
+
+### Reproducibility notes
+- Script-13E is fully config-driven through `script_13e` in `config.yaml`.
+- The exact config can be snapshotted under `configs_used/` when enabled.
+- Output ordering, bucket ranking, deduplication, and scaffold filtering use deterministic sorting and stable tie-breaking.
+- Rationale and manifest outputs preserve the exact mapping from `screening_compound_id` (and `target_chembl_id` when applicable) to shortlist-bucket assignment.
+- The JSON report records input paths, requested vs achieved bucket sizes, diversity summaries, metadata preference usage, warnings, and the config snapshot reference.
+- This step generates the final actionable screening shortlist for downstream docking/refinement review, purchase prioritization, experimental follow-up, and manuscript reporting.

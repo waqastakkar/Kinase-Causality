@@ -13,3 +13,5 @@ Step-13B (`Kinase_Causal_QSAR/scripts/13b_map_screening_library_to_model_feature
 
 
 Step-13D (`Kinase_Causal_QSAR/scripts/13d_build_strategic_screening_rankings.py`) integrates Step-13C screening predictions into target-aware and compound-level strategic ranking tables, consensus/disagreement summaries, uncertainty/applicability proxy summaries, diversity-readiness signals, and provenance-rich manifest/report assets without retraining models or creating final shortlist buckets. See `Kinase_Causal_QSAR/README.md` for full Step-13D inputs, score-component policies, outputs, and reproducibility notes.
+
+Step-13E (`Kinase_Causal_QSAR/scripts/13e_generate_screening_shortlist_buckets.py`) converts the Step-13D strategic rankings into the final actionable screening shortlist by filling explicit shortlist buckets, enforcing deterministic deduplication/diversity rules, writing shortlist rationale/diversity/manifest assets, and preserving provenance for downstream docking, purchasing, and reporting workflows. See `Kinase_Causal_QSAR/README.md` for full Step-13E bucket definitions, shortlist modes, outputs, and reproducibility notes.
