@@ -26,6 +26,7 @@ from typing import Any, Iterable, Sequence
 import numpy as np
 import pandas as pd
 import yaml
+from pandas.errors import EmptyDataError
 
 SCRIPT_NAME = "10_evaluate_compare_and_interpret_models"
 DEFAULT_SEED = 2025
@@ -562,7 +563,11 @@ def discover_first_existing(root: Path, names: Sequence[str]) -> Path | None:
 def load_optional_csv(path: Path | None) -> pd.DataFrame:
     if path is None or not path.exists():
         return pd.DataFrame()
-    return pd.read_csv(path)
+    try:
+        return pd.read_csv(path)
+    except EmptyDataError:
+        logging.warning("Optional CSV %s is empty; treating it as missing.", path)
+        return pd.DataFrame()
 
 
 def read_report(path: Path | None) -> dict[str, Any] | None:
@@ -589,7 +594,15 @@ def load_result_bundle(family: str, root: Path, expected_report_name: str) -> Re
             return pd.DataFrame()
         discovered_files.append(str(path))
         logging.info("Loading %s table from %s", family, path)
-        return pd.read_csv(path)
+        try:
+            return pd.read_csv(path)
+        except EmptyDataError:
+            if required:
+                raise
+            message = f"Optional table for {family} is empty and will be skipped: {path.name}"
+            logging.warning(message)
+            warnings.append(message)
+            return pd.DataFrame()
 
     regression_per_fold = load_named_csv(["regression_metrics_per_fold.csv"], required=True)
     regression_summary = load_named_csv(["regression_metrics_summary.csv"], required=True)
