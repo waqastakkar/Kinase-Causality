@@ -1506,3 +1506,90 @@ python scripts/13e_generate_screening_shortlist_buckets.py --config /path/to/con
 - Rationale and manifest outputs preserve the exact mapping from `screening_compound_id` (and `target_chembl_id` when applicable) to shortlist-bucket assignment.
 - The JSON report records input paths, requested vs achieved bucket sizes, diversity summaries, metadata preference usage, warnings, and the config snapshot reference.
 - This step generates the final actionable screening shortlist for downstream docking/refinement review, purchase prioritization, experimental follow-up, and manuscript reporting.
+
+## Step-13F: Screening analysis and publication-grade visualization
+
+### Purpose
+Script-13F is the final interpretation layer for the strategic screening workflow. It consumes the fixed outputs of Steps-13A through 13E and generates manuscript-ready chemical-space maps, shortlist interpretation figures, diversity/scaffold summaries, target-wise overlays, score landscapes, source-data files, a screening-analysis manifest, and a provenance-rich JSON report. This step analyzes and visualizes the screening results only; it does **not** retrain any models and does **not** alter shortlist membership.
+
+### Required inputs
+Configured under `script_13f` in `config.yaml`:
+- Step-13A/13B inputs:
+  - `screening_prepared/merged_screening_library.csv`
+  - `screening_features/screening_classical_features.csv`
+  - `screening_features/screening_environment_features.csv`
+- Step-13C/13D inputs:
+  - `screening_scores/unified_screening_scores.csv`
+  - `screening_rankings/compound_target_strategic_ranking.csv`
+  - `screening_rankings/compound_level_strategic_ranking.csv`
+- Step-13E inputs:
+  - `screening_shortlist/final_screening_shortlist.csv`
+  - `screening_shortlist/final_shortlist_rationale.csv`
+  - `screening_shortlist/shortlist_bucket_summary.csv`
+  - `screening_shortlist/shortlist_diversity_summary.csv`
+- Optional training-reference inputs for novelty/interpolation analysis:
+  - `data/processed/chembl_human_kinase_panel_annotated_long.csv`
+  - `data/processed/compound_environment_annotations.csv`
+
+The script validates required input files and required identifier columns before each major analysis stage and fails clearly when indispensable shortlist/ranking assets are missing.
+
+### Embedding methods and deterministic analysis policy
+Script-13F is fully config-driven through `script_13f` in `config.yaml`.
+- Embedding inputs are built from Morgan fingerprints when RDKit is available.
+- Numeric descriptor fallbacks and optional RDKit descriptor fallbacks are available when configured.
+- UMAP, PCA, and optional t-SNE are controlled independently from config.
+- Random-state settings are fixed for deterministic reruns whenever the underlying libraries support deterministic behavior.
+- Coordinate tables can be saved for each generated embedding, including combined training-vs-screening coordinates when optional training compounds are available.
+
+### Figure outputs
+Script-13F writes publication-grade figures under `screening_analysis/figures/`, including configurable subsets of:
+- full screening-library chemical-space maps
+- shortlist overlay maps
+- training-vs-screening comparison maps
+- bucket-specific shortlist maps
+- potency/selectivity/uncertainty/applicability/final-score landscapes
+- shortlist rationale composition plots
+- scaffold diversity and source-library contribution plots
+- target-specific overlay panels for configured targets
+
+All figures use the shared manuscript style: Times New Roman, bold visible text, Nature-style palette control, SVG-first export, and optional PNG/PDF copies.
+
+### Table outputs
+Script-13F writes analysis tables under `screening_analysis/tables/`, including configurable and derived assets such as:
+- `screening_umap_coordinates.csv`
+- `screening_pca_coordinates.csv`
+- `combined_training_screening_umap_coordinates.csv`
+- `screening_embedding_summary.csv`
+- `shortlist_bucket_statistics.csv`
+- `top_compounds_by_bucket.csv`
+- `target_specific_shortlist_summary.csv`
+- `shortlist_score_distribution_summary.csv`
+- `shortlist_novelty_summary.csv`
+- `scaffold_frequency_summary.csv`
+- `bucket_scaffold_distribution.csv`
+- `source_library_contribution_summary.csv`
+- `bucket_scaffold_overlap_matrix.csv`
+
+### Source-data and manifest policy
+- Every major figure can emit a matching CSV under `screening_analysis/source_data/`.
+- Source-data files are intended to match the plotted rows and preserve plotting-relevant columns/order wherever possible.
+- `screening_analysis/screening_analysis_manifest.csv` records each figure/table asset together with its source-data reference, panel label, row count, and notes.
+- `reports/13f_screening_analysis_report.json` records inputs used, embedding methods, counts of analyzed screening/shortlist/training compounds, generated assets, missing optional analyses, warnings, timestamp, log path, and config-snapshot reference.
+
+### Run
+From `Kinase_Causal_QSAR/`:
+```bash
+python scripts/13f_analyze_and_visualize_screening_results.py
+```
+Optional custom config:
+```bash
+python scripts/13f_analyze_and_visualize_screening_results.py --config /path/to/config.yaml
+```
+
+### Reproducibility notes
+- Script-13F is a strict continuation of Steps-13A through 13E and does not modify shortlist membership or upstream ranking outputs.
+- The exact config can be snapshotted under `configs_used/13f_analyze_and_visualize_screening_results_config.yaml` when enabled.
+- The script writes a dedicated log file, reusable embedding-coordinate tables, source-data CSVs, a manifest, and a JSON report for provenance tracking.
+- Plot styling is enforced explicitly rather than relying on matplotlib defaults so reruns remain visually consistent.
+- Optional analyses are skipped only with clear warnings in the log/report.
+
