@@ -882,6 +882,8 @@ def summarize_activity_cliff(predictions: pd.DataFrame, metric: str) -> tuple[pd
             "n_rows": int(len(frame)),
             **metrics,
         })
+    if not rows:
+        return pd.DataFrame(), pd.DataFrame()
     comparison = pd.DataFrame(rows).sort_values(["task_name", "split_strategy", "model_family", "model_name", "activity_cliff_flag"], kind="mergesort").reset_index(drop=True)
     degradation_rows: list[dict[str, Any]] = []
     for keys, frame in comparison.groupby(["model_family", "model_name", "ablation_name", "task_name", "split_strategy"], dropna=False, sort=True):
@@ -903,7 +905,14 @@ def summarize_activity_cliff(predictions: pd.DataFrame, metric: str) -> tuple[pd
             "cliff_degradation": cliff_value - non_cliff_value,
             "relative_cliff_degradation_percent": calculate_relative_improvement(cliff_value, non_cliff_value, metric),
         })
-    degradation = pd.DataFrame(degradation_rows).sort_values(["task_name", "split_strategy", "model_family", "model_name"], kind="mergesort").reset_index(drop=True)
+    degradation = (
+        pd.DataFrame(degradation_rows).sort_values(
+            ["task_name", "split_strategy", "model_family", "model_name"],
+            kind="mergesort",
+        ).reset_index(drop=True)
+        if degradation_rows
+        else pd.DataFrame()
+    )
     return comparison, degradation
 
 
