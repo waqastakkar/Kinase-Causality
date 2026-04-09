@@ -421,12 +421,26 @@ def alias_series(frame: pd.DataFrame, canonical: str, default: Any = np.nan) -> 
     return frame[column]
 
 
-def safe_numeric(series: pd.Series | pd.DataFrame | list[Any] | np.ndarray) -> pd.Series:
+def safe_numeric(series: pd.Series | pd.DataFrame | list[Any] | np.ndarray | pd.Index | Any) -> pd.Series:
     if isinstance(series, pd.DataFrame):
         if series.empty:
             return pd.Series(dtype="float64")
         coerced = series.apply(pd.to_numeric, errors="coerce")
         return coerced.bfill(axis=1).iloc[:, 0]
+
+    if isinstance(series, pd.Index):
+        series = pd.Series(series, index=series)
+    elif isinstance(series, np.ndarray) and series.ndim > 1:
+        if series.size == 0:
+            return pd.Series(dtype="float64")
+        coerced = pd.DataFrame(series).apply(pd.to_numeric, errors="coerce")
+        return coerced.bfill(axis=1).iloc[:, 0]
+    elif not isinstance(series, pd.Series):
+        try:
+            series = pd.Series(series)
+        except Exception:
+            return pd.Series(dtype="float64")
+
     return pd.to_numeric(series, errors="coerce")
 
 
