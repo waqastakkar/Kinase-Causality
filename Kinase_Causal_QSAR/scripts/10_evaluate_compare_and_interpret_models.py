@@ -1148,7 +1148,11 @@ def plot_bar_summary(df: pd.DataFrame, value_col: str, title: str, ylabel: str, 
     if df.empty or value_col not in df.columns:
         return None
     working = df.copy().sort_values(["task_name", value_col], kind="mergesort")
-    x_labels = (working["task_name"].astype(str) + "\n" + working["split_strategy"].astype(str)).tolist()
+    split_label_col = "split_strategy" if "split_strategy" in working.columns else hue_col if hue_col in working.columns else None
+    if split_label_col:
+        x_labels = (working["task_name"].astype(str) + "\n" + working[split_label_col].astype(str)).tolist()
+    else:
+        x_labels = working["task_name"].astype(str).tolist()
     categories = list(dict.fromkeys(working[hue_col].astype(str).tolist()))
     positions = np.arange(len(working))
     fig, ax = plt.subplots(figsize=(max(10, len(working) * 0.55), 6))
