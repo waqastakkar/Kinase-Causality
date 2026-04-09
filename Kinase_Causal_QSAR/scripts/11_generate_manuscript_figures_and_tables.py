@@ -709,7 +709,7 @@ def generate_ablation_summary(tables: dict[str, pd.DataFrame], cfg: AppConfig, a
         return AssetOutcome(display_name, "main_figure", "skipped", {}, ["ablation_drop_summary"], "Missing ablation drop summary.")
     plot_df = prepare_metric_view(source.rename(columns={"performance_drop": "rmse"}), "rmse")
     plot_df = plot_df.sort_values(["plot_metric", "ablation_name"], ascending=[False, True], kind="mergesort").reset_index(drop=True)
-    fig = make_bar_figure(plot_df.rename(columns={"ablation_name": "model_family"}), "Ablation", "Performance drop", "Causal ablation summary", "ablation_name", cfg)
+    fig = make_bar_figure(plot_df, "Ablation", "Performance drop", "Causal ablation summary", "ablation_name", cfg)
     base_path = cfg.output_main_figures_root / asset_id
     outputs = save_figure(fig, base_path, cfg)
     outputs["source_data"] = save_source_data(plot_df, cfg.output_figure_source_data_root / f"{asset_id}_source_data.csv", cfg)
