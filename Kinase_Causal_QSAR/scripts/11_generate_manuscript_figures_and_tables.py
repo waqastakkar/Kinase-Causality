@@ -105,6 +105,14 @@ MAIN_FIGURE_ORDER = [
     "activity_cliff_comparison",
     "low_data_learning_curves",
 ]
+MAIN_FIGURE_REQUIRED = {
+    "overall_model_comparison": True,
+    "split_strategy_robustness": True,
+    "causal_vs_baselines": False,
+    "ablation_summary": True,
+    "activity_cliff_comparison": True,
+    "low_data_learning_curves": False,
+}
 SUPP_FIGURE_ORDER = [
     "per_kinase_performance_distribution",
     "environment_group_performance",
@@ -119,6 +127,12 @@ MAIN_TABLE_ORDER = [
     "ablation_effect_summary",
     "activity_cliff_summary",
 ]
+MAIN_TABLE_REQUIRED = {
+    "overall_model_ranking": False,
+    "best_models_by_task": True,
+    "ablation_effect_summary": True,
+    "activity_cliff_summary": True,
+}
 SUPP_TABLE_ORDER = [
     "detailed_regression_metrics",
     "detailed_classification_metrics",
@@ -979,7 +993,8 @@ def main() -> int:
             generator = main_figure_generators.get(figure_name)
             if generator is None:
                 raise ValueError(f"Unknown main figure name in config: {figure_name}")
-            outcome = generator(tables, cfg, asset_id, figure_name, True)
+            required = MAIN_FIGURE_REQUIRED.get(figure_name, True)
+            outcome = generator(tables, cfg, asset_id, figure_name, required)
             if outcome.status == "generated":
                 manifest_rows.append(build_manifest_row(outcome, asset_id))
                 generated_assets.append({"asset_id": asset_id, **asdict(outcome)})
@@ -1023,9 +1038,14 @@ def main() -> int:
                 raise ValueError(f"Unknown main table name in config: {table_name}")
             df, sources, notes = main_table_sources[table_name]
             asset_id = f"Table_{idx}"
-            outcome = generate_table_asset(df, cfg, asset_id, table_name, cfg.output_main_tables_root, "main_table", cfg.output_table_source_data_root / f"{asset_id}_source_data.csv", notes, True, sources)
-            manifest_rows.append(build_manifest_row(outcome, asset_id))
-            generated_assets.append({"asset_id": asset_id, **asdict(outcome)})
+            required = MAIN_TABLE_REQUIRED.get(table_name, True)
+            outcome = generate_table_asset(df, cfg, asset_id, table_name, cfg.output_main_tables_root, "main_table", cfg.output_table_source_data_root / f"{asset_id}_source_data.csv", notes, required, sources)
+            if outcome.status == "generated":
+                manifest_rows.append(build_manifest_row(outcome, asset_id))
+                generated_assets.append({"asset_id": asset_id, **asdict(outcome)})
+            else:
+                skipped_assets.append({"asset_id": asset_id, **asdict(outcome)})
+                warnings_list.append(outcome.notes)
 
     if cfg.generate_supplementary_tables:
         for idx, table_name in enumerate(cfg.table_plan.get("supplementary_tables", SUPP_TABLE_ORDER), start=1):
