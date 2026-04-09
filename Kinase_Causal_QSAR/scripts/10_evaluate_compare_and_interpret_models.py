@@ -815,7 +815,23 @@ def compare_causal_vs_baseline(summary_df: pd.DataFrame, metric: str) -> pd.Data
             "relative_improvement_percent": calculate_relative_improvement(float(c[f"{metric}_mean"]), float(b[f"{metric}_mean"]), metric),
             "causal_better": bool(metric_diff < 0) if metric in LOWER_IS_BETTER else bool(metric_diff > 0),
         })
-    return pd.DataFrame(rows).sort_values(["task_name", "split_strategy"], kind="mergesort").reset_index(drop=True)
+    comparison_df = pd.DataFrame(rows)
+    if comparison_df.empty:
+        return pd.DataFrame(columns=[
+            "task_name",
+            "split_strategy",
+            "selection_metric",
+            "causal_model_name",
+            "causal_ablation_name",
+            "causal_metric_mean",
+            "baseline_family",
+            "baseline_model_name",
+            "baseline_metric_mean",
+            "metric_difference",
+            "relative_improvement_percent",
+            "causal_better",
+        ])
+    return comparison_df.sort_values(["task_name", "split_strategy"], kind="mergesort").reset_index(drop=True)
 
 
 def summarize_split_degradation(summary_df: pd.DataFrame, metric: str, reference_split: str = "random") -> pd.DataFrame:
