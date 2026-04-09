@@ -35,6 +35,7 @@ DEFAULT_SEED = 2025
 NATURE_PALETTE = {
     "classical": "#386CB0",
     "deep": "#F39C12",
+    "orange": "#F39C12",
     "causal": "#2CA25F",
     "ablation": "#E74C3C",
     "neutral": "#7F8C8D",
