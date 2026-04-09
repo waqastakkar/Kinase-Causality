@@ -368,8 +368,9 @@ def write_json(payload: dict[str, Any], path: Path) -> None:
 
 def round_numeric(df: pd.DataFrame, decimals: int) -> pd.DataFrame:
     rounded = df.copy()
-    numeric_columns = rounded.select_dtypes(include=[np.number]).columns
-    rounded[numeric_columns] = rounded[numeric_columns].round(decimals)
+    for column_name, column in rounded.items():
+        if pd.api.types.is_numeric_dtype(column):
+            rounded[column_name] = column.round(decimals)
     return rounded
 
 
