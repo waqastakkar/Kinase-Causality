@@ -23,6 +23,7 @@ from typing import Any, Iterable, Sequence
 import numpy as np
 import pandas as pd
 import yaml
+from pandas.errors import EmptyDataError
 
 import matplotlib
 matplotlib.use("Agg")
@@ -459,7 +460,11 @@ def load_optional_table(path: Path, description: str) -> pd.DataFrame:
         logging.warning("Optional source table missing for %s: %s", description, path)
         return pd.DataFrame()
     logging.info("Loading %s from %s", description, path)
-    return normalize_table(pd.read_csv(path))
+    try:
+        return normalize_table(pd.read_csv(path))
+    except EmptyDataError:
+        logging.warning("Optional source table is empty for %s: %s", description, path)
+        return pd.DataFrame()
 
 
 def load_inputs(cfg: AppConfig) -> tuple[dict[str, pd.DataFrame], list[str]]:
