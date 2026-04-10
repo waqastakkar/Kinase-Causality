@@ -767,6 +767,7 @@ script_13b:
 
   save_failed_rows: true
   save_config_snapshot: true
+  chunk_size: 250000
 
 
 # Script-13C screening model scoring settings
@@ -1062,4 +1063,3 @@ script_13f:
     label_fontsize: 12
     tick_fontsize: 10
     legend_fontsize: 10
-

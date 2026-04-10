@@ -25,7 +25,7 @@ import numpy as np
 import pandas as pd
 import yaml
 from rdkit import Chem, DataStructs
-from rdkit.Chem import AllChem, Crippen, Descriptors, Lipinski, rdMolDescriptors
+from rdkit.Chem import Crippen, Descriptors, Lipinski, rdFingerprintGenerator, rdMolDescriptors
 from rdkit.Chem.Scaffolds import MurckoScaffold
 
 SCRIPT_NAME = "13b_map_screening_library_to_model_feature_space"
@@ -54,6 +54,7 @@ REQUIRED_SCRIPT_13B_KEYS = {
     "applicability_reference",
     "save_failed_rows",
     "save_config_snapshot",
+    "chunk_size",
 }
 REQUIRED_CLASSICAL_KEYS = {
     "use_morgan_fingerprints",
@@ -160,6 +161,7 @@ class AppConfig:
     applicability_reference: ApplicabilityReferenceConfig
     save_failed_rows: bool
     save_config_snapshot: bool
+    chunk_size: int
     project_root: Path
     logs_dir: Path
     configs_used_dir: Path
@@ -226,6 +228,7 @@ class AppConfig:
             applicability_reference=ApplicabilityReferenceConfig(**{k: parse_bool(v, f"applicability_reference.{k}") for k, v in applicability_raw.items()}),
             save_failed_rows=parse_bool(section["save_failed_rows"], "save_failed_rows"),
             save_config_snapshot=parse_bool(section["save_config_snapshot"], "save_config_snapshot"),
+            chunk_size=max(1, int(section["chunk_size"])),
             project_root=project_root,
             logs_dir=project_root / "logs",
             configs_used_dir=project_root / "configs_used",
@@ -393,50 +396,140 @@ def build_mol(smiles: str) -> Chem.Mol | None:
     return Chem.MolFromSmiles(smiles)
 
 
-def generate_classical_features(screening_df: pd.DataFrame, metadata_columns: list[str], settings: dict[str, Any]) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, Any]]:
-    descriptor_names = rdkit_descriptor_names() if bool(settings["include_rdkit_2d_descriptors"]) else []
+def build_classical_feature_columns(settings: dict[str, Any]) -> list[str]:
+    feature_columns: list[str] = ["rdkit_parse_success"]
+    if bool(settings["use_morgan_fingerprints"]):
+        feature_columns.extend([f"morgan_{bit_idx}" for bit_idx in range(int(settings["morgan_nbits"]))])
+    if bool(settings["include_rdkit_2d_descriptors"]):
+        feature_columns.extend([f"rdkit_{name}" for name in rdkit_descriptor_names()])
+    return feature_columns
+
+
+def build_classical_output_columns(metadata_columns: list[str], feature_columns: list[str], training_feature_columns: list[str] | None) -> list[str]:
+    base_columns = ["screening_compound_id", "standardized_smiles", *metadata_columns]
+    if training_feature_columns:
+        return base_columns + training_feature_columns
+    return base_columns + feature_columns
+
+
+def generate_classical_features_chunk(
+    chunk_df: pd.DataFrame,
+    metadata_columns: list[str],
+    expected_columns: list[str],
+    descriptor_specs: list[tuple[str, Any]],
+    morgan_generator: Any | None,
+) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, int]]:
+    feature_columns = [c for c in expected_columns if c.startswith("morgan_") or c.startswith("rdkit_") or c == "rdkit_parse_success"]
+    morgan_columns = [c for c in expected_columns if c.startswith("morgan_")]
     records: list[dict[str, Any]] = []
     failures: list[dict[str, Any]] = []
-    for row in screening_df.itertuples(index=False):
+    for row in chunk_df.itertuples(index=False):
         record = {"screening_compound_id": row.screening_compound_id, "standardized_smiles": row.standardized_smiles}
         for column in metadata_columns:
             record[column] = getattr(row, column)
         mol = build_mol(str(row.standardized_smiles))
         record["rdkit_parse_success"] = int(mol is not None)
         if mol is None:
-            failure_reason = "RDKit MolFromSmiles returned None"
-            if bool(settings["use_morgan_fingerprints"]):
-                for bit_idx in range(int(settings["morgan_nbits"])):
-                    record[f"morgan_{bit_idx}"] = np.nan
-            for descriptor_name in descriptor_names:
-                record[f"rdkit_{descriptor_name}"] = np.nan
-            failures.append({"screening_compound_id": row.screening_compound_id, "standardized_smiles": row.standardized_smiles, "failure_reason": failure_reason})
+            for column in feature_columns:
+                if column != "rdkit_parse_success":
+                    record[column] = np.nan
+            failures.append({"screening_compound_id": row.screening_compound_id, "standardized_smiles": row.standardized_smiles, "failure_reason": "RDKit MolFromSmiles returned None"})
             records.append(record)
             continue
-        if bool(settings["use_morgan_fingerprints"]):
-            fp = AllChem.GetMorganFingerprintAsBitVect(mol, int(settings["morgan_radius"]), nBits=int(settings["morgan_nbits"]))
-            arr = np.zeros((int(settings["morgan_nbits"]),), dtype=int)
+        if morgan_generator is not None and morgan_columns:
+            fp = morgan_generator.GetFingerprint(mol)
+            arr = np.zeros((len(morgan_columns),), dtype=np.uint8)
             DataStructs.ConvertToNumpyArray(fp, arr)
             for bit_idx, value in enumerate(arr.tolist()):
                 record[f"morgan_{bit_idx}"] = int(value)
-        for descriptor_name, func in Descriptors._descList:
-            if not bool(settings["include_rdkit_2d_descriptors"]):
-                break
+        for descriptor_name, func in descriptor_specs:
+            column_name = f"rdkit_{descriptor_name}"
+            if column_name not in expected_columns:
+                continue
             try:
-                record[f"rdkit_{descriptor_name}"] = float(func(mol))
+                record[column_name] = float(func(mol))
             except Exception as exc:
-                record[f"rdkit_{descriptor_name}"] = np.nan
+                record[column_name] = np.nan
                 logging.warning("Descriptor %s failed for %s: %s", descriptor_name, row.screening_compound_id, exc)
         records.append(record)
-    features = pd.DataFrame.from_records(records).sort_values("screening_compound_id", kind="mergesort").reset_index(drop=True)
-    failed_rows = pd.DataFrame.from_records(failures)
+
+    chunk_features = pd.DataFrame.from_records(records)
+    if chunk_features.empty:
+        chunk_features = pd.DataFrame(columns=expected_columns)
+    chunk_features = chunk_features.sort_values("screening_compound_id", kind="mergesort").reset_index(drop=True).reindex(columns=expected_columns)
+    chunk_failures = pd.DataFrame.from_records(failures)
     metadata = {
-        "row_count": int(len(features)),
-        "success_count": int((features["rdkit_parse_success"] == 1).sum()),
-        "failure_count": int((features["rdkit_parse_success"] == 0).sum()),
-        "feature_column_count": int(len([c for c in features.columns if c.startswith("morgan_") or c.startswith("rdkit_") or c == "rdkit_parse_success"])),
+        "row_count": int(len(chunk_features)),
+        "success_count": int((chunk_features["rdkit_parse_success"] == 1).sum()) if "rdkit_parse_success" in chunk_features.columns else 0,
+        "failure_count": int((chunk_features["rdkit_parse_success"] == 0).sum()) if "rdkit_parse_success" in chunk_features.columns else 0,
     }
-    return features, failed_rows, metadata
+    return chunk_features, chunk_failures, metadata
+
+
+def generate_classical_features(
+    screening_df: pd.DataFrame,
+    metadata_columns: list[str],
+    settings: dict[str, Any],
+    output_path: Path,
+    chunk_size: int,
+    save_failed_rows: bool,
+    failed_rows_path: Path | None,
+    training_feature_columns: list[str] | None = None,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    descriptor_specs = Descriptors._descList if bool(settings["include_rdkit_2d_descriptors"]) else []
+    feature_columns = build_classical_feature_columns(settings)
+    expected_columns = build_classical_output_columns(metadata_columns, feature_columns, training_feature_columns)
+    missing_training_columns = sorted(set(training_feature_columns or []).difference(feature_columns))
+    if missing_training_columns:
+        raise RuntimeError("Generated classical features do not satisfy the training-time schema: " + ", ".join(missing_training_columns[:20]))
+
+    ensure_parent(output_path)
+    if output_path.exists():
+        output_path.unlink()
+    if failed_rows_path is not None and failed_rows_path.exists():
+        failed_rows_path.unlink()
+
+    morgan_generator = None
+    if bool(settings["use_morgan_fingerprints"]):
+        morgan_generator = rdFingerprintGenerator.GetMorganGenerator(
+            radius=int(settings["morgan_radius"]),
+            fpSize=int(settings["morgan_nbits"]),
+        )
+
+    total_rows = int(len(screening_df))
+    success_count = 0
+    failure_count = 0
+    rows_written = 0
+    chunk_index = 0
+    for start in range(0, total_rows, chunk_size):
+        chunk_df = screening_df.iloc[start:start + chunk_size]
+        chunk_features, chunk_failures, chunk_meta = generate_classical_features_chunk(
+            chunk_df=chunk_df,
+            metadata_columns=metadata_columns,
+            expected_columns=expected_columns,
+            descriptor_specs=descriptor_specs,
+            morgan_generator=morgan_generator,
+        )
+        write_mode = "w" if chunk_index == 0 else "a"
+        chunk_features.to_csv(output_path, mode=write_mode, index=False, header=(chunk_index == 0))
+        logging.info("Wrote chunk %s to disk: rows=%s path=%s", chunk_index + 1, len(chunk_features), output_path)
+        if save_failed_rows and failed_rows_path is not None and not chunk_failures.empty:
+            chunk_failures.to_csv(failed_rows_path, mode=("w" if chunk_index == 0 and not failed_rows_path.exists() else "a"), index=False, header=not failed_rows_path.exists())
+        rows_written += int(chunk_meta["row_count"])
+        success_count += int(chunk_meta["success_count"])
+        failure_count += int(chunk_meta["failure_count"])
+        chunk_index += 1
+        logging.info("Processed %s / %s rows", min(start + len(chunk_df), total_rows), total_rows)
+
+    metadata = {
+        "row_count": rows_written,
+        "success_count": success_count,
+        "failure_count": failure_count,
+        "feature_column_count": int(len(feature_columns)),
+        "output_path": str(output_path),
+        "columns": expected_columns,
+    }
+    return pd.DataFrame(columns=expected_columns), metadata
 
 
 def atom_feature_names(graph_cfg: dict[str, bool]) -> list[str]:
@@ -777,20 +870,21 @@ def main() -> int:
 
     if cfg.generate_classical_features:
         logging.info("Generating classical screening features.")
-        classical_df, classical_failures, classical_meta = generate_classical_features(screening_df, metadata_columns, classical_settings)
-        if training_feature_columns:
-            required_columns = ["screening_compound_id", "standardized_smiles", *metadata_columns] + training_feature_columns
-            missing_training_columns = sorted(set(training_feature_columns).difference(classical_df.columns))
-            if missing_training_columns:
-                raise RuntimeError("Generated classical features do not satisfy the training-time schema: " + ", ".join(missing_training_columns[:20]))
-            classical_df = classical_df[required_columns]
-        save_dataframe(classical_df, cfg.output_classical_feature_path)
-        manifest_entries.append({"asset_id": "screening_classical_features", "asset_type": "csv", "file_path": str(cfg.output_classical_feature_path.relative_to(cfg.project_root)), "row_count": len(classical_df), "feature_block": "classical", "notes": f"source={classical_settings['source']}"})
-        failed_counts["classical"] = int(len(classical_failures))
-        if cfg.save_failed_rows and not classical_failures.empty:
-            failed_path = cfg.output_feature_root / "failed_classical_feature_rows.csv"
-            save_dataframe(classical_failures, failed_path)
-            manifest_entries.append({"asset_id": "failed_classical_feature_rows", "asset_type": "csv", "file_path": str(failed_path.relative_to(cfg.project_root)), "row_count": len(classical_failures), "feature_block": "classical", "notes": "Rows with RDKit parsing failures during classical featurization."})
+        failed_path = cfg.output_feature_root / "failed_classical_feature_rows.csv"
+        classical_df, classical_meta = generate_classical_features(
+            screening_df=screening_df,
+            metadata_columns=metadata_columns,
+            settings=classical_settings,
+            output_path=cfg.output_classical_feature_path,
+            chunk_size=cfg.chunk_size,
+            save_failed_rows=cfg.save_failed_rows,
+            failed_rows_path=failed_path if cfg.save_failed_rows else None,
+            training_feature_columns=training_feature_columns,
+        )
+        manifest_entries.append({"asset_id": "screening_classical_features", "asset_type": "csv", "file_path": str(cfg.output_classical_feature_path.relative_to(cfg.project_root)), "row_count": int(classical_meta["row_count"]), "feature_block": "classical", "notes": f"source={classical_settings['source']}"})
+        failed_counts["classical"] = int(classical_meta["failure_count"])
+        if cfg.save_failed_rows and failed_path.exists():
+            manifest_entries.append({"asset_id": "failed_classical_feature_rows", "asset_type": "csv", "file_path": str(failed_path.relative_to(cfg.project_root)), "row_count": int(classical_meta["failure_count"]), "feature_block": "classical", "notes": "Rows with RDKit parsing failures during classical featurization."})
 
     if cfg.generate_graph_inputs:
         logging.info("Generating graph/deep-model screening manifest.")
@@ -818,10 +912,14 @@ def main() -> int:
     if cfg.generate_applicability_reference_features and classical_df is not None:
         logging.info("Preparing applicability-reference basis assets.")
         if cfg.applicability_reference.compare_to_training_compounds:
-            distance_proxy_path = compute_distance_proxies(classical_df, training_df, cfg.output_feature_root)
+            distance_proxy_source_df = pd.read_csv(
+                cfg.output_classical_feature_path,
+                usecols=["screening_compound_id", "standardized_smiles"],
+            )
+            distance_proxy_path = compute_distance_proxies(distance_proxy_source_df, training_df, cfg.output_feature_root)
             if distance_proxy_path is not None:
                 applicability_paths["screening_applicability_reference_features"] = str(distance_proxy_path.relative_to(cfg.project_root))
-                manifest_entries.append({"asset_id": "screening_applicability_reference_features", "asset_type": "csv", "file_path": str(distance_proxy_path.relative_to(cfg.project_root)), "row_count": len(classical_df), "feature_block": "applicability", "notes": "Deterministic novelty proxy relative to training standardized_smiles."})
+                manifest_entries.append({"asset_id": "screening_applicability_reference_features", "asset_type": "csv", "file_path": str(distance_proxy_path.relative_to(cfg.project_root)), "row_count": int(classical_meta["row_count"]), "feature_block": "applicability", "notes": "Deterministic novelty proxy relative to training standardized_smiles."})
         if cfg.applicability_reference.save_training_feature_reference_summary:
             summary_path = summarize_training_reference(training_df, cfg.output_feature_root)
             if summary_path is not None:
@@ -855,7 +953,7 @@ def main() -> int:
             "script_13b_snapshot": str(snapshot_path) if snapshot_path is not None else None,
         },
         "total_screening_compounds_processed": int(len(screening_df)),
-        "total_compounds_successfully_featurized_for_classical_models": int(len(classical_df)) if classical_df is not None else 0,
+        "total_compounds_successfully_featurized_for_classical_models": int(classical_meta["success_count"]) if classical_df is not None else 0,
         "total_compounds_successfully_prepared_for_graph_deep_models": int(int(graph_df["graph_success_flag"].sum())) if graph_df is not None else 0,
         "total_compounds_successfully_annotated_with_environment_features": int(int((env_df["environment_parse_success"] == 1).sum())) if env_df is not None else 0,
         "feature_space_consistency_summary": qc_df.to_dict(orient="records"),
