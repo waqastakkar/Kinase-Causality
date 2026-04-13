@@ -683,18 +683,29 @@ def reconstruct_causal_model_from_artifact(path: Path, torch: Any, state_dict: d
         metadata["state_dict_load_mode"] = "strict"
     except Exception as strict_exc:
         load_result = model.load_state_dict(state_dict, strict=False)
-        metadata["state_dict_load_mode"] = "non_strict"
-        metadata["missing_state_dict_keys"] = sorted(list(load_result.missing_keys))
-        metadata["unexpected_state_dict_keys"] = sorted(list(load_result.unexpected_keys))
-        logging.warning(
-            "Non-strict causal state_dict load for %s (%s). Missing=%s Unexpected=%s StrictError=%s",
-            path,
-            model_name,
-            metadata["missing_state_dict_keys"],
-            metadata["unexpected_state_dict_keys"],
-            strict_exc,
-        )
+        missing_keys = sorted(list(load_result.missing_keys))
+        unexpected_keys = sorted(list(load_result.unexpected_keys))
+        metadata["state_dict_load_mode"] = "non_strict_rejected"
+        metadata["missing_state_dict_keys"] = missing_keys
+        metadata["unexpected_state_dict_keys"] = unexpected_keys
+        raise RuntimeError(
+            "Causal model reconstruction rejected because strict state_dict loading failed; "
+            "the checkpoint likely needs architecture-aware loading instead of tensor-table fallback. "
+            f"path={path} model={model_name} missing_keys={missing_keys[:10]} unexpected_keys={unexpected_keys[:10]} strict_error={strict_exc}"
+        ) from strict_exc
     return model, metadata
+
+
+def _build_failed_rows_for_scoring_exception(record: ModelRecord, ready: pd.DataFrame, reason: str) -> pd.DataFrame:
+    failed_rows = ready[
+        ["screening_compound_id", "standardized_smiles"]
+        + [c for c in ["source_library_name", "target_chembl_id", "target_name"] if c in ready.columns]
+    ].copy()
+    failed_rows["failure_reason"] = reason
+    failed_rows["model_family"] = record.model_family
+    failed_rows["model_name"] = record.model_name
+    failed_rows["task_name"] = record.task_name
+    return failed_rows
 
 
 def _load_torch_module_or_bundle(path: Path, torch: Any, record: ModelRecord) -> tuple[Any, dict[str, Any]]:
@@ -900,7 +911,16 @@ def score_torch_chunk(record: ModelRecord, runtime: dict[str, Any], graph_df: pd
     torch = runtime["torch"]
     tensor = torch.tensor(ready[numeric_cols].fillna(0.0).to_numpy(dtype=np.float32))
     with torch.no_grad():
-        output_tensor = runtime["model"](tensor)
+        try:
+            output_tensor = runtime["model"](tensor)
+        except Exception as exc:
+            reason = f"model_forward_failed::{type(exc).__name__}::{exc}"
+            failed_all = _build_failed_rows_for_scoring_exception(record, ready, reason)
+            return (
+                pd.DataFrame(),
+                pd.concat([failed_rows, failed_all], ignore_index=True),
+                {"attempted": int(len(merged)), "scored": 0, "failed": int(len(failed_rows) + len(failed_all))},
+            )
     if isinstance(output_tensor, (list, tuple)):
         output_tensor = output_tensor[0]
     predictions = np.asarray(output_tensor.detach().cpu().numpy()).reshape(-1)
