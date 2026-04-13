@@ -82,6 +82,7 @@ METADATA_CANDIDATE_NAMES = (
 )
 REQUIRED_SCREENING_COLUMNS = {"screening_compound_id", "standardized_smiles"}
 OPTIONAL_SCREENING_COLUMNS = ["source_library_name", "target_name", "target_chembl_id"]
+TARGET_ANNOTATION_FALLBACK_PATH = Path("data/processed/chembl_human_kinase_panel_annotated_long.csv")
 MODEL_SELECTION_COLUMN_CANDIDATES = {
     "model_family": ("model_family", "family"),
     "model_name": ("model_name", "model"),
@@ -166,6 +167,7 @@ class AppConfig:
     selected_families_to_score: tuple[str, ...]
     skip_unloadable_models: bool
     require_all_models_loadable: bool
+    strict_graph_inference_bundle_required: bool
     project_root: Path
     logs_dir: Path
     configs_used_dir: Path
@@ -270,6 +272,9 @@ class AppConfig:
             selected_families_to_score=selected_families,
             skip_unloadable_models=parse_bool(section.get("skip_unloadable_models", True), "skip_unloadable_models"),
             require_all_models_loadable=parse_bool(section.get("require_all_models_loadable", False), "require_all_models_loadable"),
+            strict_graph_inference_bundle_required=parse_bool(
+                section.get("strict_graph_inference_bundle_required", True), "strict_graph_inference_bundle_required"
+            ),
             project_root=project_root,
             logs_dir=project_root / "logs",
             configs_used_dir=project_root / "configs_used",
@@ -529,7 +534,39 @@ def resolve_models(cfg: AppConfig) -> list[ModelRecord]:
     return sorted(records, key=lambda rec: (rec.model_family, rec.task_name, rec.supporting_rank, rec.model_name, str(rec.artifact_path)))
 
 
-def build_target_frame(base_df: pd.DataFrame, cfg: AppConfig, task_name: str, model_record: ModelRecord) -> pd.DataFrame:
+def build_target_metadata_map(cfg: AppConfig) -> dict[str, str]:
+    mapping: dict[str, str] = {}
+    sources = [
+        cfg.input_best_models_by_task_path,
+        cfg.input_best_models_by_split_strategy_path,
+        cfg.project_root / TARGET_ANNOTATION_FALLBACK_PATH,
+    ]
+    for path in sources:
+        if not path.exists():
+            continue
+        try:
+            frame = pd.read_csv(path, low_memory=False)
+        except Exception as exc:
+            logging.warning("Unable to read target metadata source %s: %s", path, exc)
+            continue
+        if "target_chembl_id" not in frame.columns or "target_name" not in frame.columns:
+            continue
+        pairs = (
+            frame[["target_chembl_id", "target_name"]]
+            .dropna()
+            .astype(str)
+            .assign(target_chembl_id=lambda x: x["target_chembl_id"].str.strip(), target_name=lambda x: x["target_name"].str.strip())
+        )
+        pairs = pairs[(pairs["target_chembl_id"] != "") & (pairs["target_name"] != "")]
+        for row in pairs.drop_duplicates().itertuples(index=False):
+            mapping[str(row.target_chembl_id)] = str(row.target_name)
+    logging.info("Loaded target metadata map entries: %s", len(mapping))
+    return mapping
+
+
+def build_target_frame(
+    base_df: pd.DataFrame, cfg: AppConfig, task_name: str, model_record: ModelRecord, target_name_map: dict[str, str] | None = None
+) -> pd.DataFrame:
     if task_name == "pairwise_selectivity":
         raise NotImplementedError("Pairwise selectivity screening requires explicit pair mapping metadata.")
     if cfg.target_selection_mode != "explicit_list":
@@ -539,13 +576,15 @@ def build_target_frame(base_df: pd.DataFrame, cfg: AppConfig, task_name: str, mo
     else:
         targets = list(cfg.target_chembl_ids)
     expanded: list[pd.DataFrame] = []
+    target_name_map = target_name_map or {}
     for target in targets:
         frame = base_df.copy()
         frame["target_chembl_id"] = target
+        frame["target_name"] = target_name_map.get(str(target), str(target))
         expanded.append(frame)
     combined = pd.concat(expanded, ignore_index=True) if expanded else pd.DataFrame(columns=base_df.columns)
     if "target_name" not in combined.columns:
-        combined["target_name"] = np.nan
+        combined["target_name"] = combined.get("target_chembl_id", "").astype(str)
     return combined
 
 
@@ -695,8 +734,30 @@ def _load_torch_module_or_bundle(path: Path, torch: Any, record: ModelRecord) ->
         )
     metadata["artifact_kind"] = "raw_state_dict"
     if record.model_family in {"deep", "causal"}:
-        raise RuntimeError("raw_graph_checkpoint_without_inference_bundle")
+        raise RuntimeError(
+            "raw_graph_checkpoint_without_inference_bundle::"
+            "Graph-based deep/causal checkpoint requires original architecture and graph-aware screening inference bundle; flat tensor fallback is not supported."
+        )
     raise RuntimeError(f"Raw state_dict unsupported for model family `{record.model_family}` at {path}.")
+
+
+def _extract_serialized_sklearn_version(artifact: Any) -> str | None:
+    if isinstance(artifact, dict):
+        for key in ("sklearn_version", "scikit_learn_version", "scikit-learn-version"):
+            value = artifact.get(key)
+            if value is not None and str(value).strip():
+                return str(value).strip()
+        metadata = artifact.get("metadata")
+        if isinstance(metadata, dict):
+            for key in ("sklearn_version", "scikit_learn_version", "scikit-learn-version"):
+                value = metadata.get(key)
+                if value is not None and str(value).strip():
+                    return str(value).strip()
+    model = artifact.get("model") if isinstance(artifact, dict) else None
+    version = getattr(model, "_sklearn_version", None)
+    if version is not None and str(version).strip():
+        return str(version).strip()
+    return None
 
 
 def prepare_model_runtime(record: ModelRecord) -> dict[str, Any]:
@@ -707,7 +768,11 @@ def prepare_model_runtime(record: ModelRecord) -> dict[str, Any]:
         feature_columns = artifact.get("feature_columns")
         if not isinstance(feature_columns, list) or not feature_columns:
             raise ValueError(f"Classical artifact missing non-empty `feature_columns`: {record.artifact_path}")
-        return {"model": artifact["model"], "feature_columns": feature_columns, "metadata": {}}
+        return {
+            "model": artifact["model"],
+            "feature_columns": feature_columns,
+            "metadata": {"serialized_sklearn_version": _extract_serialized_sklearn_version(artifact)},
+        }
     torch = _load_torch()
     model, metadata = _load_torch_module_or_bundle(record.artifact_path, torch, record)
     inference_mode = _extract_inference_mode(metadata)
@@ -725,9 +790,14 @@ def preflight_validate_model_runtimes(cfg: AppConfig, model_records: list[ModelR
     loadable_records: list[ModelRecord] = []
     runtimes: dict[int, dict[str, Any]] = {}
     skipped: list[ModelLoadFailure] = []
+    serialized_sklearn_versions: set[str] = set()
     for record in model_records:
         try:
             runtime = prepare_model_runtime(record)
+            if record.model_family == "classical":
+                version = runtime.get("metadata", {}).get("serialized_sklearn_version")
+                if version:
+                    serialized_sklearn_versions.add(str(version))
             loadable_records.append(record)
             runtimes[len(loadable_records) - 1] = runtime
         except Exception as exc:
@@ -757,13 +827,36 @@ def preflight_validate_model_runtimes(cfg: AppConfig, model_records: list[ModelR
     )
     for failure in skipped:
         logging.warning(
-            "Skipping unloadable model during preflight: family=%s model=%s task=%s artifact=%s diagnostic=%s reason=%s",
+            "Skipping model for screening safety: family=%s model=%s task=%s checkpoint_exists=true "
+            "valid_screening_inference_artifact=false diagnostic=%s reason=%s artifact=%s",
             failure.record.model_family,
             failure.record.model_name,
             failure.record.task_name,
-            failure.record.artifact_path,
             failure.artifact_diagnostic,
             failure.reason,
+            failure.record.artifact_path,
+        )
+    try:
+        import sklearn  # type: ignore
+
+        current_sklearn = str(getattr(sklearn, "__version__", "unknown"))
+    except Exception:
+        current_sklearn = "unavailable"
+    if serialized_sklearn_versions:
+        if current_sklearn not in serialized_sklearn_versions:
+            logging.warning(
+                "scikit-learn version mismatch detected. runtime_version=%s serialized_versions=%s. "
+                "Predictions may be unsafe across sklearn versions.",
+                current_sklearn,
+                sorted(serialized_sklearn_versions),
+            )
+        else:
+            logging.info("scikit-learn version check passed. runtime_version=%s serialized_version=%s", current_sklearn, current_sklearn)
+    else:
+        logging.warning(
+            "Unable to determine serialized sklearn version from classical artifacts. runtime_version=%s. "
+            "Predictions may be unsafe across sklearn versions.",
+            current_sklearn,
         )
 
     if skipped and cfg.require_all_models_loadable:
@@ -798,7 +891,7 @@ def validate_chunk_alignment(chunk_idx: int, left: pd.DataFrame, right: pd.DataF
 def iter_screening_chunks(cfg: AppConfig) -> Iterator[tuple[int, pd.DataFrame, pd.DataFrame, pd.DataFrame]]:
     classical_iter = pd.read_csv(cfg.input_classical_feature_path, chunksize=cfg.chunk_size, low_memory=cfg.low_memory)
     graph_iter = pd.read_csv(cfg.input_graph_manifest_path, chunksize=cfg.chunk_size, low_memory=cfg.low_memory)
-    env_iter = pd.read_csv(cfg.input_environment_feature_path, chunksize=cfg.chunk_size, low_memory=cfg.low_memory)
+    env_iter = pd.read_csv(cfg.input_environment_feature_path, chunksize=cfg.chunk_size, low_memory=False)
     chunk_idx = 0
     while True:
         classical_chunk = next(classical_iter, None)
@@ -821,11 +914,19 @@ def iter_screening_chunks(cfg: AppConfig) -> Iterator[tuple[int, pd.DataFrame, p
         chunk_idx += 1
 
 
-def score_classical_chunk(record: ModelRecord, runtime: dict[str, Any], feature_df: pd.DataFrame, cfg: AppConfig) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, int]]:
-    missing_features = sorted(set(runtime["feature_columns"]).difference(feature_df.columns))
+def score_classical_chunk(
+    record: ModelRecord, runtime: dict[str, Any], feature_df: pd.DataFrame, cfg: AppConfig, target_name_map: dict[str, str]
+) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, int]]:
+    scoring_df = build_target_frame(feature_df, cfg, record.task_name, record, target_name_map=target_name_map)
+    missing_features = sorted(set(runtime["feature_columns"]).difference(scoring_df.columns))
     if missing_features:
-        raise ValueError(f"Chunk missing classical feature columns for model {record.model_name}: {missing_features[:25]}")
-    scoring_df = build_target_frame(feature_df, cfg, record.task_name, record)
+        target_conditioned = [col for col in missing_features if "target" in col.lower() or "chembl" in col.lower()]
+        available_sample = sorted(scoring_df.columns.tolist())[:20]
+        raise ValueError(
+            f"Chunk missing classical feature columns for model {record.model_name}: {missing_features[:25]}; "
+            f"looks_target_conditioned={bool(target_conditioned)}; "
+            f"target_conditioned_missing={target_conditioned[:10]}; available_column_sample={available_sample}"
+        )
     matrix = scoring_df[runtime["feature_columns"]]
     invalid_mask = matrix.isna().any(axis=1)
     failed_rows = scoring_df.loc[invalid_mask, ["screening_compound_id", "standardized_smiles"] + [c for c in ["source_library_name", "target_chembl_id", "target_name"] if c in scoring_df.columns]].copy()
@@ -853,7 +954,14 @@ def score_classical_chunk(record: ModelRecord, runtime: dict[str, Any], feature_
     return output, failed_rows, {"attempted": int(len(scoring_df)), "scored": int(len(output)), "failed": int(len(failed_rows))}
 
 
-def score_torch_chunk(record: ModelRecord, runtime: dict[str, Any], graph_df: pd.DataFrame, environment_df: pd.DataFrame, cfg: AppConfig) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, int]]:
+def score_torch_chunk(
+    record: ModelRecord,
+    runtime: dict[str, Any],
+    graph_df: pd.DataFrame,
+    environment_df: pd.DataFrame,
+    cfg: AppConfig,
+    target_name_map: dict[str, str],
+) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, int]]:
     metadata = runtime.get("metadata", {})
     inference_mode = _extract_inference_mode(metadata)
     if inference_mode != "flat_numeric_tensor" or not _supports_flat_numeric_tensor_input(metadata):
@@ -862,7 +970,7 @@ def score_torch_chunk(record: ModelRecord, runtime: dict[str, Any], graph_df: pd
             f"mode={inference_mode or 'missing'} supports_flat_numeric_tensor={_supports_flat_numeric_tensor_input(metadata)}"
         )
 
-    base = build_target_frame(graph_df, cfg, record.task_name, record)
+    base = build_target_frame(graph_df, cfg, record.task_name, record, target_name_map=target_name_map)
     merged = base.merge(environment_df, on=["screening_compound_id", "standardized_smiles"], how="left", suffixes=("", "_env"))
     if record.model_family == "causal":
         missing_env = merged.filter(regex=r"^(env_|environment_|kinase_family|murcko_scaffold)").isna().all(axis=1) if not merged.empty else pd.Series(dtype=bool)
@@ -969,6 +1077,7 @@ def build_model_metadata_table(records: list[ModelRecord]) -> pd.DataFrame:
 
 def run_streaming_scoring(cfg: AppConfig, model_records: list[ModelRecord], config_snapshot_path: Path | None) -> None:
     output_paths = prepare_output_paths(cfg)
+    target_name_map = build_target_metadata_map(cfg)
     model_records, runtimes, skipped_models = preflight_validate_model_runtimes(cfg, model_records)
     if not model_records:
         raise RuntimeError("No loadable models remained after preflight validation.")
@@ -1002,9 +1111,9 @@ def run_streaming_scoring(cfg: AppConfig, model_records: list[ModelRecord], conf
             logging.info("Scoring chunk %s with %s/%s", chunk_idx, record.model_family, record.model_name)
             runtime = runtimes[idx]
             if record.model_family == "classical":
-                pred, failed, counts = score_classical_chunk(record, runtime, classical_chunk, cfg)
+                pred, failed, counts = score_classical_chunk(record, runtime, classical_chunk, cfg, target_name_map)
             else:
-                pred, failed, counts = score_torch_chunk(record, runtime, graph_chunk, env_chunk, cfg)
+                pred, failed, counts = score_torch_chunk(record, runtime, graph_chunk, env_chunk, cfg, target_name_map)
 
             counters[idx]["attempted"] += counts["attempted"]
             counters[idx]["scored"] += counts["scored"]
