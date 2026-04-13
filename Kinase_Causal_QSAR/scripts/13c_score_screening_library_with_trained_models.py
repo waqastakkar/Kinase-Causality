@@ -72,6 +72,16 @@ REQUIRED_SCRIPT_13C_KEYS = {
     "num_workers",
     "chunk_size",
 }
+METADATA_CANDIDATE_NAMES = (
+    "inference_metadata.json",
+    "model_metadata.json",
+    "run_metadata.json",
+    "training_summary.json",
+    "config.yaml",
+    "config_used.yaml",
+)
+KNOWN_DEEP_MODEL_NAMES = {"gin", "gcn", "mpnn", "gat"}
+KNOWN_CAUSAL_MODEL_NAMES = {"causal_gin"}
 REQUIRED_SCREENING_COLUMNS = {"screening_compound_id", "standardized_smiles"}
 OPTIONAL_SCREENING_COLUMNS = ["source_library_name", "target_name", "target_chembl_id"]
 MODEL_SELECTION_COLUMN_CANDIDATES = {
@@ -156,6 +166,8 @@ class AppConfig:
     overwrite_existing_outputs: bool
     allow_full_wide_pivot: bool
     selected_families_to_score: tuple[str, ...]
+    skip_unloadable_models: bool
+    require_all_models_loadable: bool
     project_root: Path
     logs_dir: Path
     configs_used_dir: Path
@@ -258,6 +270,8 @@ class AppConfig:
             overwrite_existing_outputs=parse_bool(section.get("overwrite_existing_outputs", False), "overwrite_existing_outputs"),
             allow_full_wide_pivot=parse_bool(section.get("allow_full_wide_pivot", False), "allow_full_wide_pivot"),
             selected_families_to_score=selected_families,
+            skip_unloadable_models=parse_bool(section.get("skip_unloadable_models", True), "skip_unloadable_models"),
+            require_all_models_loadable=parse_bool(section.get("require_all_models_loadable", False), "require_all_models_loadable"),
             project_root=project_root,
             logs_dir=project_root / "logs",
             configs_used_dir=project_root / "configs_used",
@@ -280,6 +294,13 @@ class ModelRecord:
     ablation_name: str | None = None
     supporting_rank: int = 0
     notes: str = ""
+
+
+@dataclass
+class ModelLoadFailure:
+    record: ModelRecord
+    reason: str
+    artifact_diagnostic: str
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -549,22 +570,169 @@ def _load_torch() -> Any:
     return torch
 
 
-def _load_torch_module_or_bundle(path: Path, torch: Any) -> tuple[Any, dict[str, Any]]:
+def _flatten_metadata(payload: Any, sink: dict[str, Any]) -> None:
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            sink[str(key)] = value
+
+
+def _read_metadata_file(path: Path) -> dict[str, Any]:
+    try:
+        if path.suffix.lower() == ".json":
+            parsed = json.loads(path.read_text(encoding="utf-8"))
+        elif path.suffix.lower() in {".yaml", ".yml"}:
+            parsed = yaml.safe_load(path.read_text(encoding="utf-8"))
+        else:
+            return {}
+    except Exception:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _discover_metadata_near_artifact(path: Path, max_parent_levels: int = 3) -> dict[str, Any]:
+    discovered: dict[str, Any] = {"metadata_sources": []}
+    search_dirs = [path.parent]
+    current = path.parent
+    for _ in range(max_parent_levels):
+        current = current.parent
+        search_dirs.append(current)
+    for directory in search_dirs:
+        for candidate_name in METADATA_CANDIDATE_NAMES:
+            candidate = directory / candidate_name
+            if candidate.exists():
+                payload = _read_metadata_file(candidate)
+                if payload:
+                    _flatten_metadata(payload, discovered)
+                    discovered["metadata_sources"].append(str(candidate))
+        for candidate in sorted(directory.glob("*.json")) + sorted(directory.glob("*.yaml")) + sorted(directory.glob("*.yml")):
+            if str(candidate) in discovered["metadata_sources"]:
+                continue
+            payload = _read_metadata_file(candidate)
+            if payload:
+                _flatten_metadata(payload, discovered)
+                discovered["metadata_sources"].append(str(candidate))
+    return discovered
+
+
+def _unwrap_state_dict(payload: Any) -> dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return None
+    if "state_dict" in payload and isinstance(payload["state_dict"], dict):
+        return payload["state_dict"]
+    values = list(payload.values())
+    if values and all(hasattr(v, "shape") for v in values):
+        return payload
+    return None
+
+
+def _infer_mlp_dimensions_from_state_dict(state_dict: dict[str, Any]) -> list[tuple[int, int]]:
+    linear_layers: list[tuple[int, int]] = []
+    for key, tensor in state_dict.items():
+        if not key.endswith("weight") or not hasattr(tensor, "shape"):
+            continue
+        shape = tuple(int(dim) for dim in tensor.shape)
+        if len(shape) == 2:
+            linear_layers.append((shape[1], shape[0]))
+    return linear_layers
+
+
+def _build_linear_stack_for_state_dict(torch: Any, state_dict: dict[str, Any], model_name: str) -> Any:
+    nn = torch.nn
+    inferred = _infer_mlp_dimensions_from_state_dict(state_dict)
+    if not inferred:
+        raise RuntimeError(
+            f"Raw state_dict checkpoint for model `{model_name}` contains no 2D linear weights; cannot reconstruct a tensor-input inference module."
+        )
+    layers: list[Any] = []
+    for idx, (in_dim, out_dim) in enumerate(inferred):
+        layers.append(nn.Linear(in_dim, out_dim))
+        if idx < len(inferred) - 1:
+            layers.append(nn.ReLU())
+    return nn.Sequential(*layers)
+
+
+def reconstruct_deep_model_from_artifact(path: Path, torch: Any, state_dict: dict[str, Any], metadata: dict[str, Any], model_name: str, task_name: str) -> tuple[Any, dict[str, Any]]:
+    if model_name.lower() not in KNOWN_DEEP_MODEL_NAMES:
+        raise RuntimeError(f"Deep reconstruction does not recognize model name `{model_name}` for task `{task_name}`.")
+    model = _build_linear_stack_for_state_dict(torch, state_dict, model_name=model_name)
+    try:
+        model.load_state_dict(state_dict, strict=True)
+        metadata["state_dict_load_mode"] = "strict"
+    except Exception as strict_exc:
+        load_result = model.load_state_dict(state_dict, strict=False)
+        metadata["state_dict_load_mode"] = "non_strict"
+        metadata["missing_state_dict_keys"] = sorted(list(load_result.missing_keys))
+        metadata["unexpected_state_dict_keys"] = sorted(list(load_result.unexpected_keys))
+        logging.warning(
+            "Non-strict deep state_dict load for %s (%s). Missing=%s Unexpected=%s StrictError=%s",
+            path,
+            model_name,
+            metadata["missing_state_dict_keys"],
+            metadata["unexpected_state_dict_keys"],
+            strict_exc,
+        )
+    return model, metadata
+
+
+def reconstruct_causal_model_from_artifact(path: Path, torch: Any, state_dict: dict[str, Any], metadata: dict[str, Any], model_name: str, task_name: str) -> tuple[Any, dict[str, Any]]:
+    if model_name.lower() not in KNOWN_CAUSAL_MODEL_NAMES:
+        raise RuntimeError(f"Causal reconstruction does not recognize model name `{model_name}` for task `{task_name}`.")
+    model = _build_linear_stack_for_state_dict(torch, state_dict, model_name=model_name)
+    try:
+        model.load_state_dict(state_dict, strict=True)
+        metadata["state_dict_load_mode"] = "strict"
+    except Exception as strict_exc:
+        load_result = model.load_state_dict(state_dict, strict=False)
+        metadata["state_dict_load_mode"] = "non_strict"
+        metadata["missing_state_dict_keys"] = sorted(list(load_result.missing_keys))
+        metadata["unexpected_state_dict_keys"] = sorted(list(load_result.unexpected_keys))
+        logging.warning(
+            "Non-strict causal state_dict load for %s (%s). Missing=%s Unexpected=%s StrictError=%s",
+            path,
+            model_name,
+            metadata["missing_state_dict_keys"],
+            metadata["unexpected_state_dict_keys"],
+            strict_exc,
+        )
+    return model, metadata
+
+
+def _load_torch_module_or_bundle(path: Path, torch: Any, record: ModelRecord) -> tuple[Any, dict[str, Any]]:
     bundle_path = path.with_name("inference_bundle.pt")
-    metadata_path = path.with_name("inference_metadata.json")
+    metadata = _discover_metadata_near_artifact(path)
+    metadata["artifact_path"] = str(path)
     if bundle_path.exists():
         payload = torch.load(bundle_path, map_location="cpu")
         if isinstance(payload, dict) and "model" in payload:
-            return payload["model"], payload.get("metadata", {})
+            metadata.update(payload.get("metadata", {}))
+            metadata["artifact_kind"] = "inference_bundle"
+            return payload["model"], metadata
     payload = torch.load(path, map_location="cpu")
     if hasattr(payload, "eval") and hasattr(payload, "forward"):
-        return payload, {}
-    metadata: dict[str, Any] = {}
-    if metadata_path.exists():
-        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        metadata["artifact_kind"] = "direct_module"
+        return payload, metadata
     if isinstance(payload, dict) and "model" in payload and hasattr(payload["model"], "eval"):
+        metadata["artifact_kind"] = "dict_with_model"
         return payload["model"], metadata
-    raise RuntimeError(f"Torch artifact {path} does not contain a directly loadable model object.")
+    state_dict = _unwrap_state_dict(payload)
+    if state_dict is None:
+        raise RuntimeError(
+            f"Torch artifact {path} is neither direct module, dict-with-model, inference bundle, nor raw state_dict."
+        )
+    metadata["artifact_kind"] = "raw_state_dict"
+    if record.model_family == "deep":
+        if not metadata.get("metadata_sources"):
+            raise RuntimeError(
+                f"Raw state_dict detected at {path} for deep model `{record.model_name}`, but no reconstruction metadata files were found nearby."
+            )
+        return reconstruct_deep_model_from_artifact(path, torch, state_dict, metadata, record.model_name, record.task_name)
+    if record.model_family == "causal":
+        if not metadata.get("metadata_sources"):
+            raise RuntimeError(
+                f"Raw state_dict detected at {path} for causal model `{record.model_name}`, but no reconstruction metadata files were found nearby."
+            )
+        return reconstruct_causal_model_from_artifact(path, torch, state_dict, metadata, record.model_name, record.task_name)
+    raise RuntimeError(f"Raw state_dict reconstruction is unsupported for model family `{record.model_family}` at {path}.")
 
 
 def prepare_model_runtime(record: ModelRecord) -> dict[str, Any]:
@@ -577,9 +745,63 @@ def prepare_model_runtime(record: ModelRecord) -> dict[str, Any]:
             raise ValueError(f"Classical artifact missing non-empty `feature_columns`: {record.artifact_path}")
         return {"model": artifact["model"], "feature_columns": feature_columns, "metadata": {}}
     torch = _load_torch()
-    model, metadata = _load_torch_module_or_bundle(record.artifact_path, torch)
+    model, metadata = _load_torch_module_or_bundle(record.artifact_path, torch, record)
     model.eval()
     return {"torch": torch, "model": model, "metadata": metadata}
+
+
+def preflight_validate_model_runtimes(cfg: AppConfig, model_records: list[ModelRecord]) -> tuple[list[ModelRecord], dict[int, dict[str, Any]], list[ModelLoadFailure]]:
+    loadable_records: list[ModelRecord] = []
+    runtimes: dict[int, dict[str, Any]] = {}
+    skipped: list[ModelLoadFailure] = []
+    for record in model_records:
+        try:
+            runtime = prepare_model_runtime(record)
+            loadable_records.append(record)
+            runtimes[len(loadable_records) - 1] = runtime
+        except Exception as exc:
+            reason = str(exc)
+            artifact_kind = "unknown"
+            if "direct module" in reason:
+                artifact_kind = "direct_module"
+            elif "dict-with-model" in reason or "dict with model" in reason:
+                artifact_kind = "dict_with_model"
+            elif "inference bundle" in reason:
+                artifact_kind = "inference_bundle"
+            elif "no reconstruction metadata files" in reason:
+                artifact_kind = "raw_state_dict_without_metadata"
+            elif "Raw state_dict detected" in reason or "state_dict" in reason:
+                artifact_kind = "raw_state_dict_reconstruction_failed"
+            skipped.append(ModelLoadFailure(record=record, reason=reason, artifact_diagnostic=artifact_kind))
+
+    logging.info(
+        "Preflight model validation complete. loadable=%s skipped=%s total=%s",
+        len(loadable_records),
+        len(skipped),
+        len(model_records),
+    )
+    for failure in skipped:
+        logging.warning(
+            "Skipping unloadable model during preflight: family=%s model=%s task=%s artifact=%s diagnostic=%s reason=%s",
+            failure.record.model_family,
+            failure.record.model_name,
+            failure.record.task_name,
+            failure.record.artifact_path,
+            failure.artifact_diagnostic,
+            failure.reason,
+        )
+
+    if skipped and cfg.require_all_models_loadable:
+        summary = "; ".join(
+            f"{f.record.model_family}/{f.record.model_name} ({f.artifact_diagnostic}): {f.reason}" for f in skipped[:5]
+        )
+        raise RuntimeError(f"Model preflight failed because require_all_models_loadable=true. Examples: {summary}")
+    if skipped and not cfg.skip_unloadable_models and not cfg.require_all_models_loadable:
+        summary = "; ".join(
+            f"{f.record.model_family}/{f.record.model_name} ({f.artifact_diagnostic}): {f.reason}" for f in skipped[:5]
+        )
+        raise RuntimeError(f"Model preflight found unloadable models and skip_unloadable_models=false. Examples: {summary}")
+    return loadable_records, runtimes, skipped
 
 
 def validate_chunk_alignment(chunk_idx: int, left: pd.DataFrame, right: pd.DataFrame, left_name: str, right_name: str) -> None:
@@ -755,7 +977,9 @@ def build_model_metadata_table(records: list[ModelRecord]) -> pd.DataFrame:
 
 def run_streaming_scoring(cfg: AppConfig, model_records: list[ModelRecord], config_snapshot_path: Path | None) -> None:
     output_paths = prepare_output_paths(cfg)
-    runtimes = {idx: prepare_model_runtime(record) for idx, record in enumerate(model_records)}
+    model_records, runtimes, skipped_models = preflight_validate_model_runtimes(cfg, model_records)
+    if not model_records:
+        raise RuntimeError("No loadable models remained after preflight validation.")
 
     wrote_header: dict[Path, bool] = defaultdict(bool)
     buffered_frames: dict[Path, list[pd.DataFrame]] = defaultdict(list)
@@ -834,9 +1058,51 @@ def run_streaming_scoring(cfg: AppConfig, model_records: list[ModelRecord], conf
             }
         )
     qc_df = pd.DataFrame(qc_rows).sort_values(["model_family", "task_name", "model_name"], kind="mergesort").reset_index(drop=True)
+    if skipped_models:
+        skipped_qc = pd.DataFrame(
+            [
+                {
+                    "model_family": entry.record.model_family,
+                    "model_name": entry.record.model_name,
+                    "task_name": entry.record.task_name,
+                    "target_chembl_id": entry.record.target_chembl_id,
+                    "number_of_compounds_attempted": 0,
+                    "number_of_compounds_scored_successfully": 0,
+                    "number_of_failed_rows": 0,
+                    "number_of_processed_chunks": 0,
+                    "notes": f"SKIPPED_UNLOADABLE_MODEL::{entry.artifact_diagnostic}::{entry.reason}",
+                }
+                for entry in skipped_models
+            ]
+        )
+        qc_df = pd.concat([qc_df, skipped_qc], ignore_index=True)
+        qc_df = qc_df.sort_values(["model_family", "task_name", "model_name"], kind="mergesort").reset_index(drop=True)
     write_dataframe(qc_df, output_paths["qc_summary"])
 
     metadata_df = build_model_metadata_table(model_records)
+    if skipped_models:
+        skipped_metadata = pd.DataFrame(
+            [
+                {
+                    "model_family": entry.record.model_family,
+                    "model_name": entry.record.model_name,
+                    "task_name": entry.record.task_name,
+                    "source_step": entry.record.source_step,
+                    "artifact_path": str(entry.record.artifact_path),
+                    "selected_as_best_flag": entry.record.selected_as_best_flag,
+                    "selection_criterion": entry.record.selection_criterion,
+                    "split_strategy_used": entry.record.split_strategy_used,
+                    "target_label": entry.record.target_label,
+                    "target_chembl_id": entry.record.target_chembl_id,
+                    "ablation_name": entry.record.ablation_name,
+                    "supporting_rank": entry.record.supporting_rank,
+                    "notes": f"SKIPPED_UNLOADABLE_MODEL::{entry.artifact_diagnostic}::{entry.reason}",
+                }
+                for entry in skipped_models
+            ]
+        )
+        metadata_df = pd.concat([metadata_df, skipped_metadata], ignore_index=True)
+        metadata_df = metadata_df.sort_values(["model_family", "task_name", "supporting_rank", "model_name"], kind="mergesort").reset_index(drop=True)
     if cfg.save_model_metadata_table:
         write_dataframe(metadata_df, output_paths["metadata"])
 
@@ -855,6 +1121,7 @@ def run_streaming_scoring(cfg: AppConfig, model_records: list[ModelRecord], conf
     manifest_rows = [
         {"asset_id": "unified_scores", "asset_type": "unified_prediction_table", "file_path": str(output_paths["unified_scores"]), "row_count": int(sum(v["scored"] for v in counters.values())), "notes": "Streaming unified long-format predictions."},
         {"asset_id": "screening_qc_summary", "asset_type": "qc_summary", "file_path": str(output_paths["qc_summary"]), "row_count": int(len(qc_df)), "notes": "Per-model screening scoring QC summary."},
+        {"asset_id": "preflight_skipped_models", "asset_type": "preflight_model_validation", "file_path": str(output_paths["qc_summary"]), "row_count": int(len(skipped_models)), "notes": "Count of unloadable models skipped during preflight validation."},
     ]
     for family in SUPPORTED_MODEL_FAMILIES:
         manifest_rows.append({"asset_id": f"{family}_scores", "asset_type": "raw_prediction_table", "file_path": str(output_paths[f"{family}_scores"]), "row_count": int(sum(counters[idx]["scored"] for idx, rec in enumerate(model_records) if rec.model_family == family)), "notes": f"Family-specific predictions for {family}."})
@@ -872,6 +1139,21 @@ def run_streaming_scoring(cfg: AppConfig, model_records: list[ModelRecord], conf
         "total_compounds_successfully_scored_by_classical_models": len(family_scored_compounds["classical"]),
         "total_compounds_successfully_scored_by_deep_models": len(family_scored_compounds["deep"]),
         "total_compounds_successfully_scored_by_causal_models": len(family_scored_compounds["causal"]),
+        "preflight_model_validation_summary": {
+            "loadable_models": len(model_records),
+            "skipped_models": len(skipped_models),
+            "skipped_model_details": [
+                {
+                    "model_family": entry.record.model_family,
+                    "model_name": entry.record.model_name,
+                    "task_name": entry.record.task_name,
+                    "artifact_path": str(entry.record.artifact_path),
+                    "artifact_diagnostic": entry.artifact_diagnostic,
+                    "reason": entry.reason,
+                }
+                for entry in skipped_models
+            ],
+        },
         "task_coverage_summary": [
             {"task_name": task, "model_family": family, "n_prediction_rows": n} for (task, family), n in sorted(task_coverage.items())
         ],

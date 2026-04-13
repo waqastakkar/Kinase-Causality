@@ -822,6 +822,8 @@ script_13c:
   low_memory: true
   overwrite_existing_outputs: true
   allow_full_wide_pivot: false
+  skip_unloadable_models: true
+  require_all_models_loadable: false
 
   device: auto
   batch_size: 128
