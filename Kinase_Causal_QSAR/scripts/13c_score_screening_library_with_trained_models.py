@@ -80,8 +80,6 @@ METADATA_CANDIDATE_NAMES = (
     "config.yaml",
     "config_used.yaml",
 )
-KNOWN_DEEP_MODEL_NAMES = {"gin", "gcn", "mpnn", "gat"}
-KNOWN_CAUSAL_MODEL_NAMES = {"causal_gin"}
 REQUIRED_SCREENING_COLUMNS = {"screening_compound_id", "standardized_smiles"}
 OPTIONAL_SCREENING_COLUMNS = ["source_library_name", "target_name", "target_chembl_id"]
 MODEL_SELECTION_COLUMN_CANDIDATES = {
@@ -625,75 +623,36 @@ def _unwrap_state_dict(payload: Any) -> dict[str, Any] | None:
     return None
 
 
-def _infer_mlp_dimensions_from_state_dict(state_dict: dict[str, Any]) -> list[tuple[int, int]]:
-    linear_layers: list[tuple[int, int]] = []
-    for key, tensor in state_dict.items():
-        if not key.endswith("weight") or not hasattr(tensor, "shape"):
-            continue
-        shape = tuple(int(dim) for dim in tensor.shape)
-        if len(shape) == 2:
-            linear_layers.append((shape[1], shape[0]))
-    return linear_layers
+def _is_truthy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "enabled"}
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return False
 
 
-def _build_linear_stack_for_state_dict(torch: Any, state_dict: dict[str, Any], model_name: str) -> Any:
-    nn = torch.nn
-    inferred = _infer_mlp_dimensions_from_state_dict(state_dict)
-    if not inferred:
-        raise RuntimeError(
-            f"Raw state_dict checkpoint for model `{model_name}` contains no 2D linear weights; cannot reconstruct a tensor-input inference module."
-        )
-    layers: list[Any] = []
-    for idx, (in_dim, out_dim) in enumerate(inferred):
-        layers.append(nn.Linear(in_dim, out_dim))
-        if idx < len(inferred) - 1:
-            layers.append(nn.ReLU())
-    return nn.Sequential(*layers)
+def _extract_inference_mode(metadata: dict[str, Any]) -> str:
+    for key in ("inference_mode", "runtime_inference_mode", "screening_inference_mode"):
+        value = metadata.get(key)
+        if value is not None and str(value).strip():
+            return str(value).strip().lower()
+    return ""
 
 
-def reconstruct_deep_model_from_artifact(path: Path, torch: Any, state_dict: dict[str, Any], metadata: dict[str, Any], model_name: str, task_name: str) -> tuple[Any, dict[str, Any]]:
-    if model_name.lower() not in KNOWN_DEEP_MODEL_NAMES:
-        raise RuntimeError(f"Deep reconstruction does not recognize model name `{model_name}` for task `{task_name}`.")
-    model = _build_linear_stack_for_state_dict(torch, state_dict, model_name=model_name)
-    try:
-        model.load_state_dict(state_dict, strict=True)
-        metadata["state_dict_load_mode"] = "strict"
-    except Exception as strict_exc:
-        load_result = model.load_state_dict(state_dict, strict=False)
-        metadata["state_dict_load_mode"] = "non_strict"
-        metadata["missing_state_dict_keys"] = sorted(list(load_result.missing_keys))
-        metadata["unexpected_state_dict_keys"] = sorted(list(load_result.unexpected_keys))
-        logging.warning(
-            "Non-strict deep state_dict load for %s (%s). Missing=%s Unexpected=%s StrictError=%s",
-            path,
-            model_name,
-            metadata["missing_state_dict_keys"],
-            metadata["unexpected_state_dict_keys"],
-            strict_exc,
-        )
-    return model, metadata
+def _supports_flat_numeric_tensor_input(metadata: dict[str, Any]) -> bool:
+    for key in ("supports_flat_numeric_tensor", "supports_flat_table_tensor", "allow_flat_numeric_tensor"):
+        if key in metadata and _is_truthy(metadata.get(key)):
+            return True
+    return False
 
 
-def reconstruct_causal_model_from_artifact(path: Path, torch: Any, state_dict: dict[str, Any], metadata: dict[str, Any], model_name: str, task_name: str) -> tuple[Any, dict[str, Any]]:
-    if model_name.lower() not in KNOWN_CAUSAL_MODEL_NAMES:
-        raise RuntimeError(f"Causal reconstruction does not recognize model name `{model_name}` for task `{task_name}`.")
-    model = _build_linear_stack_for_state_dict(torch, state_dict, model_name=model_name)
-    try:
-        model.load_state_dict(state_dict, strict=True)
-        metadata["state_dict_load_mode"] = "strict"
-    except Exception as strict_exc:
-        load_result = model.load_state_dict(state_dict, strict=False)
-        missing_keys = sorted(list(load_result.missing_keys))
-        unexpected_keys = sorted(list(load_result.unexpected_keys))
-        metadata["state_dict_load_mode"] = "non_strict_rejected"
-        metadata["missing_state_dict_keys"] = missing_keys
-        metadata["unexpected_state_dict_keys"] = unexpected_keys
-        raise RuntimeError(
-            "Causal model reconstruction rejected because strict state_dict loading failed; "
-            "the checkpoint likely needs architecture-aware loading instead of tensor-table fallback. "
-            f"path={path} model={model_name} missing_keys={missing_keys[:10]} unexpected_keys={unexpected_keys[:10]} strict_error={strict_exc}"
-        ) from strict_exc
-    return model, metadata
+def _is_explicitly_screening_ready(metadata: dict[str, Any]) -> bool:
+    for key in ("screening_ready", "is_screening_ready", "inference_ready_for_screening"):
+        if key in metadata and _is_truthy(metadata.get(key)):
+            return True
+    return False
 
 
 def _build_failed_rows_for_scoring_exception(record: ModelRecord, ready: pd.DataFrame, reason: str) -> pd.DataFrame:
@@ -720,30 +679,24 @@ def _load_torch_module_or_bundle(path: Path, torch: Any, record: ModelRecord) ->
             return payload["model"], metadata
     payload = torch.load(path, map_location="cpu")
     if hasattr(payload, "eval") and hasattr(payload, "forward"):
+        if not _is_explicitly_screening_ready(metadata):
+            raise RuntimeError("direct_module_not_screening_ready")
         metadata["artifact_kind"] = "direct_module"
         return payload, metadata
     if isinstance(payload, dict) and "model" in payload and hasattr(payload["model"], "eval"):
+        metadata.update(payload.get("metadata", {}))
+        if not _is_explicitly_screening_ready(metadata):
+            raise RuntimeError("direct_module_not_screening_ready")
         metadata["artifact_kind"] = "dict_with_model"
         return payload["model"], metadata
-    state_dict = _unwrap_state_dict(payload)
-    if state_dict is None:
+    if _unwrap_state_dict(payload) is None:
         raise RuntimeError(
             f"Torch artifact {path} is neither direct module, dict-with-model, inference bundle, nor raw state_dict."
         )
     metadata["artifact_kind"] = "raw_state_dict"
-    if record.model_family == "deep":
-        if not metadata.get("metadata_sources"):
-            raise RuntimeError(
-                f"Raw state_dict detected at {path} for deep model `{record.model_name}`, but no reconstruction metadata files were found nearby."
-            )
-        return reconstruct_deep_model_from_artifact(path, torch, state_dict, metadata, record.model_name, record.task_name)
-    if record.model_family == "causal":
-        if not metadata.get("metadata_sources"):
-            raise RuntimeError(
-                f"Raw state_dict detected at {path} for causal model `{record.model_name}`, but no reconstruction metadata files were found nearby."
-            )
-        return reconstruct_causal_model_from_artifact(path, torch, state_dict, metadata, record.model_name, record.task_name)
-    raise RuntimeError(f"Raw state_dict reconstruction is unsupported for model family `{record.model_family}` at {path}.")
+    if record.model_family in {"deep", "causal"}:
+        raise RuntimeError("raw_graph_checkpoint_without_inference_bundle")
+    raise RuntimeError(f"Raw state_dict unsupported for model family `{record.model_family}` at {path}.")
 
 
 def prepare_model_runtime(record: ModelRecord) -> dict[str, Any]:
@@ -757,6 +710,13 @@ def prepare_model_runtime(record: ModelRecord) -> dict[str, Any]:
         return {"model": artifact["model"], "feature_columns": feature_columns, "metadata": {}}
     torch = _load_torch()
     model, metadata = _load_torch_module_or_bundle(record.artifact_path, torch, record)
+    inference_mode = _extract_inference_mode(metadata)
+    if not inference_mode:
+        raise RuntimeError("missing_supported_inference_mode_metadata")
+    if inference_mode != "flat_numeric_tensor":
+        raise RuntimeError(f"unsupported_inference_mode::{inference_mode}")
+    if not _supports_flat_numeric_tensor_input(metadata):
+        raise RuntimeError("flat_numeric_tensor_not_explicitly_supported")
     model.eval()
     return {"torch": torch, "model": model, "metadata": metadata}
 
@@ -779,10 +739,14 @@ def preflight_validate_model_runtimes(cfg: AppConfig, model_records: list[ModelR
                 artifact_kind = "dict_with_model"
             elif "inference bundle" in reason:
                 artifact_kind = "inference_bundle"
-            elif "no reconstruction metadata files" in reason:
-                artifact_kind = "raw_state_dict_without_metadata"
-            elif "Raw state_dict detected" in reason or "state_dict" in reason:
-                artifact_kind = "raw_state_dict_reconstruction_failed"
+            elif "raw_graph_checkpoint_without_inference_bundle" in reason:
+                artifact_kind = "raw_graph_checkpoint_without_inference_bundle"
+            elif "state_dict" in reason:
+                artifact_kind = "raw_state_dict_unsupported"
+            elif "unsupported_inference_mode" in reason or "missing_supported_inference_mode_metadata" in reason:
+                artifact_kind = "unsupported_inference_mode"
+            elif "not_explicitly_supported" in reason or "not_screening_ready" in reason:
+                artifact_kind = "not_screening_ready_for_screening"
             skipped.append(ModelLoadFailure(record=record, reason=reason, artifact_diagnostic=artifact_kind))
 
     logging.info(
@@ -890,6 +854,14 @@ def score_classical_chunk(record: ModelRecord, runtime: dict[str, Any], feature_
 
 
 def score_torch_chunk(record: ModelRecord, runtime: dict[str, Any], graph_df: pd.DataFrame, environment_df: pd.DataFrame, cfg: AppConfig) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, int]]:
+    metadata = runtime.get("metadata", {})
+    inference_mode = _extract_inference_mode(metadata)
+    if inference_mode != "flat_numeric_tensor" or not _supports_flat_numeric_tensor_input(metadata):
+        raise ValueError(
+            f"Unsupported runtime inference mode for {record.model_family}/{record.model_name}: "
+            f"mode={inference_mode or 'missing'} supports_flat_numeric_tensor={_supports_flat_numeric_tensor_input(metadata)}"
+        )
+
     base = build_target_frame(graph_df, cfg, record.task_name, record)
     merged = base.merge(environment_df, on=["screening_compound_id", "standardized_smiles"], how="left", suffixes=("", "_env"))
     if record.model_family == "causal":
