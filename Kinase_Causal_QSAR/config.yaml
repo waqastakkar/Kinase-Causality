@@ -824,7 +824,7 @@ script_13c:
   allow_full_wide_pivot: false
   skip_unloadable_models: true
   require_all_models_loadable: false
-  strict_graph_inference_bundle_required: true
+  strict_graph_inference_bundle_required: false
 
   device: auto
   batch_size: 128

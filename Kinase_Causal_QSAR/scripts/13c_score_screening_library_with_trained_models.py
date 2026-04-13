@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import logging
 import pickle
@@ -760,30 +761,178 @@ def _extract_serialized_sklearn_version(artifact: Any) -> str | None:
     return None
 
 
-def prepare_model_runtime(record: ModelRecord) -> dict[str, Any]:
-    if record.model_family == "classical":
-        artifact = load_pickle_artifact(record.artifact_path)
-        if not isinstance(artifact, dict) or "model" not in artifact:
-            raise ValueError(f"Classical artifact must contain `model`: {record.artifact_path}")
-        feature_columns = artifact.get("feature_columns")
-        if not isinstance(feature_columns, list) or not feature_columns:
-            raise ValueError(f"Classical artifact missing non-empty `feature_columns`: {record.artifact_path}")
-        return {
-            "model": artifact["model"],
-            "feature_columns": feature_columns,
-            "metadata": {"serialized_sklearn_version": _extract_serialized_sklearn_version(artifact)},
-        }
-    torch = _load_torch()
-    model, metadata = _load_torch_module_or_bundle(record.artifact_path, torch, record)
-    inference_mode = _extract_inference_mode(metadata)
-    if not inference_mode:
-        raise RuntimeError("missing_supported_inference_mode_metadata")
-    if inference_mode != "flat_numeric_tensor":
-        raise RuntimeError(f"unsupported_inference_mode::{inference_mode}")
-    if not _supports_flat_numeric_tensor_input(metadata):
-        raise RuntimeError("flat_numeric_tensor_not_explicitly_supported")
+def _load_script_module(script_path: Path, module_tag: str) -> Any:
+    spec = importlib.util.spec_from_file_location(module_tag, script_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Unable to load module from {script_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _read_nearest_config_yaml(path: Path) -> dict[str, Any]:
+    for candidate in [path.parent / "config_used.yaml", path.parent / "config.yaml", Path("config.yaml"), Path("Kinase_Causal_QSAR/config.yaml")]:
+        if candidate.exists():
+            return load_yaml(candidate.resolve())
+    raise RuntimeError("missing_config_yaml_for_reconstruction")
+
+
+def _infer_step08_dims_from_state_dict(state_dict: dict[str, Any], model_name: str) -> tuple[int, int]:
+    if model_name == "mpnn":
+        node_dim = int(state_dict["conv1.nn.0.weight"].shape[1])
+        edge_dim = int(state_dict["conv1.nn.0.weight"].shape[1])
+    else:
+        if model_name == "gin":
+            node_dim = int(state_dict["conv1.nn.0.weight"].shape[1])
+        else:
+            node_dim = int(state_dict["conv1.lin.weight"].shape[1] if "conv1.lin.weight" in state_dict else state_dict["conv1.weight"].shape[1])
+        edge_dim = 0
+    return node_dim, edge_dim
+
+
+def _discover_vocabularies_json(path: Path) -> dict[str, Any] | None:
+    for directory in [path.parent, *path.parents]:
+        candidate = directory / "vocabularies.json"
+        if candidate.exists():
+            try:
+                parsed = json.loads(candidate.read_text(encoding="utf-8"))
+                if isinstance(parsed, dict):
+                    return parsed
+            except Exception:
+                continue
+    return None
+
+
+def _load_target_family_map(cfg: AppConfig) -> dict[str, str]:
+    mapping: dict[str, str] = {}
+    candidate_paths = [cfg.project_root / "data/processed/chembl_human_kinase_panel_annotated_long.csv"]
+    for path in candidate_paths:
+        if not path.exists():
+            continue
+        frame = pd.read_csv(path, low_memory=False)
+        family_col = next((c for c in ["kinase_family", "kinase_family_label", "target_family", "broad_kinase_family"] if c in frame.columns), None)
+        if family_col is None or "target_chembl_id" not in frame.columns:
+            continue
+        dedup = frame[["target_chembl_id", family_col]].dropna().drop_duplicates()
+        for row in dedup.itertuples(index=False):
+            mapping[str(row[0])] = str(row[1])
+    return mapping
+
+
+def load_existing_classical_runtime(record: ModelRecord) -> dict[str, Any]:
+    artifact = load_pickle_artifact(record.artifact_path)
+    if not isinstance(artifact, dict) or "model" not in artifact:
+        raise ValueError(f"Classical artifact must contain `model`: {record.artifact_path}")
+    feature_columns = artifact.get("feature_columns")
+    if not isinstance(feature_columns, list) or not feature_columns:
+        raise ValueError(f"Classical artifact missing non-empty `feature_columns`: {record.artifact_path}")
+    return {"runtime_mode": "classical_tabular", "model": artifact["model"], "feature_columns": feature_columns, "metadata": {"serialized_sklearn_version": _extract_serialized_sklearn_version(artifact)}}
+
+
+def load_existing_deep_runtime(record: ModelRecord, cfg: AppConfig) -> dict[str, Any]:
+    if record.artifact_path.name != "best_model.pt":
+        raise RuntimeError("missing_step08_best_model_checkpoint")
+    raw_cfg = _read_nearest_config_yaml(record.artifact_path)
+    script08_path = cfg.project_root / "scripts/08_train_graph_and_deep_baseline_models.py"
+    if not script08_path.exists():
+        script08_path = cfg.project_root / "Kinase_Causal_QSAR/scripts/08_train_graph_and_deep_baseline_models.py"
+    step08 = _load_script_module(script08_path, "step08_runtime")
+    app08 = step08.AppConfig.from_dict(raw_cfg, script08_path.parent.parent)
+    deps = step08.import_runtime_dependencies()
+    torch = deps["torch"]
+    payload = torch.load(record.artifact_path, map_location="cpu")
+    state_dict = _unwrap_state_dict(payload)
+    if state_dict is None:
+        raise RuntimeError("incompatible_checkpoint_keys_for_step08")
+    node_dim, edge_dim = _infer_step08_dims_from_state_dict(state_dict, record.model_name)
+    target_map: dict[str, int] = {}
+    family_map: dict[str, int] = {}
+    if app08.sequence_or_target_encoding.use_target_identity_embedding:
+        for input_key in ["input_regression_long_path", "input_target_vs_panel_path", "input_pairwise_selectivity_path"]:
+            table_path = getattr(app08, input_key, None)
+            if table_path and Path(table_path).exists():
+                frame = pd.read_csv(table_path, low_memory=False)
+                for col in ["target_chembl_id", "kinase_a_chembl_id", "kinase_b_chembl_id"]:
+                    if col in frame.columns:
+                        target_map.update({value: idx + 1 for idx, value in enumerate(sorted(set(frame[col].dropna().astype(str).tolist())))})
+    if app08.sequence_or_target_encoding.use_kinase_family_embedding:
+        family_lookup = _load_target_family_map(cfg)
+        family_map = {value: idx + 1 for idx, value in enumerate(sorted(set(family_lookup.values())))}
+    model_factory = step08.make_model_factory(
+        deps,
+        app08,
+        {
+            "task_name": record.task_name,
+            "output_mode": "regression",
+            "node_feature_dim": node_dim,
+            "edge_feature_dim": edge_dim,
+            "target_vocab_size": max(1, len(target_map)),
+            "family_vocab_size": max(1, len(family_map)),
+            "pair_vocab_size": max(1, len(target_map)),
+        },
+    )
+    model_ctor = model_factory.get(record.model_name)
+    if model_ctor is None:
+        raise RuntimeError(f"missing_model_class_information::{record.model_name}")
+    model = model_ctor()
+    model.load_state_dict(state_dict, strict=True)
     model.eval()
-    return {"torch": torch, "model": model, "metadata": metadata}
+    return {"runtime_mode": "graph_batch", "torch": torch, "deps": deps, "model": model, "node_features": app08.node_features, "edge_features": app08.edge_features, "target_map": target_map, "family_map": family_map, "target_family_map": _load_target_family_map(cfg), "metadata": {"reconstructed_from": "step08_checkpoint"}}
+
+
+def load_existing_causal_runtime(record: ModelRecord, cfg: AppConfig) -> dict[str, Any]:
+    if record.artifact_path.name != "model_state_dict.pt":
+        raise RuntimeError("missing_step09_model_state_dict")
+    vocab = _discover_vocabularies_json(record.artifact_path)
+    if not vocab:
+        raise RuntimeError("missing_target_or_environment_vocabulary")
+    raw_cfg = _read_nearest_config_yaml(record.artifact_path)
+    script09_path = cfg.project_root / "scripts/09_train_causal_environment_aware_model.py"
+    if not script09_path.exists():
+        script09_path = cfg.project_root / "Kinase_Causal_QSAR/scripts/09_train_causal_environment_aware_model.py"
+    step09 = _load_script_module(script09_path, "step09_runtime")
+    app09 = step09.AppConfig.from_dict(raw_cfg, script09_path.parent.parent)
+    deps = step09.import_training_dependencies()
+    torch = deps["torch"]
+    state_dict = _unwrap_state_dict(torch.load(record.artifact_path, map_location="cpu"))
+    if state_dict is None:
+        raise RuntimeError("incompatible_checkpoint_keys")
+    ModelClass = step09.make_model_class(deps)
+    sample_in_dim = int(state_dict["encoder.input_proj.weight"].shape[1]) if "encoder.input_proj.weight" in state_dict else 8
+    env_vocab = vocab.get("environment_vocab") or {}
+    model = ModelClass(
+        in_dim=sample_in_dim,
+        cfg=app09,
+        num_targets=len(vocab.get("target_vocab") or {}),
+        num_families=len(vocab.get("family_vocab") or {}),
+        num_envs=len(env_vocab),
+        task_name=record.task_name,
+        task_type="regression",
+        grl_lambda=app09.loss_weights.get("environment_adversarial_loss", 0.0),
+    )
+    model.load_state_dict(state_dict, strict=True)
+    model.eval()
+    resolved_env_column = None
+    for candidates in app09.environment_columns.values():
+        for col in candidates:
+            if col in pd.read_csv(cfg.input_environment_feature_path, nrows=0).columns:
+                resolved_env_column = col
+                break
+        if resolved_env_column:
+            break
+    if not resolved_env_column:
+        raise RuntimeError("missing_environment_vocabulary_or_columns")
+    return {"runtime_mode": "graph_batch_with_environment", "torch": torch, "deps": deps, "model": model, "vocab": vocab, "environment_column": resolved_env_column, "target_family_map": _load_target_family_map(cfg), "metadata": {"reconstructed_from": "step09_checkpoint"}}
+
+
+def prepare_model_runtime(record: ModelRecord, cfg: AppConfig) -> dict[str, Any]:
+    if record.model_family == "classical":
+        return load_existing_classical_runtime(record)
+    if record.model_family == "deep":
+        return load_existing_deep_runtime(record, cfg=cfg)
+    if record.model_family == "causal":
+        return load_existing_causal_runtime(record, cfg=cfg)
+    raise ValueError(f"Unsupported model family: {record.model_family}")
 
 
 def preflight_validate_model_runtimes(cfg: AppConfig, model_records: list[ModelRecord]) -> tuple[list[ModelRecord], dict[int, dict[str, Any]], list[ModelLoadFailure]]:
@@ -793,7 +942,7 @@ def preflight_validate_model_runtimes(cfg: AppConfig, model_records: list[ModelR
     serialized_sklearn_versions: set[str] = set()
     for record in model_records:
         try:
-            runtime = prepare_model_runtime(record)
+            runtime = prepare_model_runtime(record, cfg)
             if record.model_family == "classical":
                 version = runtime.get("metadata", {}).get("serialized_sklearn_version")
                 if version:
@@ -962,56 +1111,157 @@ def score_torch_chunk(
     cfg: AppConfig,
     target_name_map: dict[str, str],
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, int]]:
-    metadata = runtime.get("metadata", {})
-    inference_mode = _extract_inference_mode(metadata)
-    if inference_mode != "flat_numeric_tensor" or not _supports_flat_numeric_tensor_input(metadata):
-        raise ValueError(
-            f"Unsupported runtime inference mode for {record.model_family}/{record.model_name}: "
-            f"mode={inference_mode or 'missing'} supports_flat_numeric_tensor={_supports_flat_numeric_tensor_input(metadata)}"
-        )
-
     base = build_target_frame(graph_df, cfg, record.task_name, record, target_name_map=target_name_map)
     merged = base.merge(environment_df, on=["screening_compound_id", "standardized_smiles"], how="left", suffixes=("", "_env"))
-    if record.model_family == "causal":
-        missing_env = merged.filter(regex=r"^(env_|environment_|kinase_family|murcko_scaffold)").isna().all(axis=1) if not merged.empty else pd.Series(dtype=bool)
-    else:
-        missing_env = pd.Series([False] * len(merged), index=merged.index)
-    failed_rows = merged.loc[missing_env, ["screening_compound_id", "standardized_smiles"] + [c for c in ["source_library_name", "target_chembl_id", "target_name"] if c in merged.columns]].copy()
-    failed_rows["failure_reason"] = "missing_environment_encodings" if record.model_family == "causal" else "graph_input_not_ready"
-    failed_rows["model_family"] = record.model_family
-    failed_rows["model_name"] = record.model_name
-    failed_rows["task_name"] = record.task_name
-    ready = merged.loc[~missing_env].copy()
-    if ready.empty:
-        return pd.DataFrame(), failed_rows, {"attempted": int(len(merged)), "scored": 0, "failed": int(len(failed_rows))}
-
-    numeric_cols = [col for col in ready.columns if col not in {"screening_compound_id", "standardized_smiles", "source_library_name", "target_chembl_id", "target_name"} and pd.api.types.is_numeric_dtype(ready[col])]
-    if not numeric_cols:
-        raise ValueError(f"No numeric inference features were available for {record.model_family}/{record.model_name} in this chunk.")
     torch = runtime["torch"]
-    tensor = torch.tensor(ready[numeric_cols].fillna(0.0).to_numpy(dtype=np.float32))
-    with torch.no_grad():
-        try:
-            output_tensor = runtime["model"](tensor)
-        except Exception as exc:
-            reason = f"model_forward_failed::{type(exc).__name__}::{exc}"
-            failed_all = _build_failed_rows_for_scoring_exception(record, ready, reason)
-            return (
-                pd.DataFrame(),
-                pd.concat([failed_rows, failed_all], ignore_index=True),
-                {"attempted": int(len(merged)), "scored": 0, "failed": int(len(failed_rows) + len(failed_all))},
-            )
-    if isinstance(output_tensor, (list, tuple)):
-        output_tensor = output_tensor[0]
-    predictions = np.asarray(output_tensor.detach().cpu().numpy()).reshape(-1)
+    failed_records: list[dict[str, Any]] = []
+    preds: list[float] = []
+    kept_rows: list[dict[str, Any]] = []
 
-    output = ready[["screening_compound_id", "standardized_smiles"] + [c for c in ["source_library_name", "target_chembl_id", "target_name"] if c in ready.columns]].copy()
+    if runtime["runtime_mode"] == "graph_batch":
+        Data = runtime["deps"]["Data"]
+        DataLoader = runtime["deps"]["DataLoader"]
+        Chem = runtime["deps"]["Chem"]
+        rdchem = runtime["deps"]["rdchem"]
+        for row in merged.itertuples(index=False):
+            mol = Chem.MolFromSmiles(str(row.standardized_smiles))
+            if mol is None or mol.GetNumAtoms() == 0:
+                failed_records.append({"screening_compound_id": row.screening_compound_id, "standardized_smiles": row.standardized_smiles, "failure_reason": "missing_graph_feature_metadata"})
+                continue
+            atom_rows: list[list[float]] = []
+            for atom in mol.GetAtoms():
+                feats: list[float] = []
+                if runtime["node_features"].get("use_atom_type", True):
+                    symbols = ["C", "N", "O", "S", "F", "P", "Cl", "Br", "I"]
+                    feats.extend([1.0 if atom.GetSymbol() == s else 0.0 for s in symbols] + [0.0 if atom.GetSymbol() in symbols else 1.0])
+                if runtime["node_features"].get("use_degree", True):
+                    feats.append(float(atom.GetDegree()))
+                if runtime["node_features"].get("use_formal_charge", True):
+                    feats.append(float(atom.GetFormalCharge()))
+                if runtime["node_features"].get("use_hybridization", True):
+                    hybs = [rdchem.HybridizationType.SP, rdchem.HybridizationType.SP2, rdchem.HybridizationType.SP3]
+                    feats.extend([1.0 if atom.GetHybridization() == h else 0.0 for h in hybs] + [0.0 if atom.GetHybridization() in hybs else 1.0])
+                if runtime["node_features"].get("use_aromaticity", True):
+                    feats.append(float(atom.GetIsAromatic()))
+                if runtime["node_features"].get("use_num_hs", True):
+                    feats.append(float(atom.GetTotalNumHs()))
+                if runtime["node_features"].get("use_chirality", True):
+                    feats.extend([
+                        1.0 if atom.GetChiralTag() == rdchem.ChiralType.CHI_UNSPECIFIED else 0.0,
+                        1.0 if atom.GetChiralTag() == rdchem.ChiralType.CHI_TETRAHEDRAL_CW else 0.0,
+                        1.0 if atom.GetChiralTag() == rdchem.ChiralType.CHI_TETRAHEDRAL_CCW else 0.0,
+                    ])
+                atom_rows.append(feats)
+            edge_idx: list[list[int]] = []
+            edge_attr: list[list[float]] = []
+            for bond in mol.GetBonds():
+                bfeats: list[float] = []
+                if runtime["edge_features"].get("use_bond_type", True):
+                    types = [rdchem.BondType.SINGLE, rdchem.BondType.DOUBLE, rdchem.BondType.TRIPLE, rdchem.BondType.AROMATIC]
+                    bfeats.extend([1.0 if bond.GetBondType() == t else 0.0 for t in types] + [0.0 if bond.GetBondType() in types else 1.0])
+                if runtime["edge_features"].get("use_conjugation", True):
+                    bfeats.append(float(bond.GetIsConjugated()))
+                if runtime["edge_features"].get("use_ring_status", True):
+                    bfeats.append(float(bond.IsInRing()))
+                if runtime["edge_features"].get("use_stereo", True):
+                    stereo = [rdchem.BondStereo.STEREONONE, rdchem.BondStereo.STEREOANY, rdchem.BondStereo.STEREOZ, rdchem.BondStereo.STEREOE]
+                    bfeats.extend([1.0 if bond.GetStereo() == t else 0.0 for t in stereo] + [0.0 if bond.GetStereo() in stereo else 1.0])
+                i, j = int(bond.GetBeginAtomIdx()), int(bond.GetEndAtomIdx())
+                edge_idx.extend([[i, j], [j, i]])
+                edge_attr.extend([bfeats, bfeats])
+            datum = Data(
+                x=torch.tensor(atom_rows, dtype=torch.float32),
+                edge_index=torch.tensor(edge_idx, dtype=torch.long).t().contiguous() if edge_idx else torch.empty((2, 0), dtype=torch.long),
+                edge_attr=torch.tensor(edge_attr, dtype=torch.float32) if edge_attr else torch.empty((0, 0), dtype=torch.float32),
+            )
+            target_id = runtime["target_map"].get(str(getattr(row, "target_chembl_id", "")), 0)
+            family_name = runtime["target_family_map"].get(str(getattr(row, "target_chembl_id", "")), "<UNK>")
+            family_id = runtime["family_map"].get(str(family_name), 0)
+            datum.target_id = torch.tensor([target_id], dtype=torch.long)
+            datum.target_family_id = torch.tensor([family_id], dtype=torch.long)
+            datum.kinase_a_id = torch.tensor([target_id], dtype=torch.long)
+            datum.kinase_b_id = torch.tensor([target_id], dtype=torch.long)
+            datum._meta = {"screening_compound_id": row.screening_compound_id, "standardized_smiles": row.standardized_smiles, "source_library_name": getattr(row, "source_library_name", ""), "target_chembl_id": getattr(row, "target_chembl_id", ""), "target_name": getattr(row, "target_name", "")}
+            kept_rows.append(datum._meta)
+            preds.append(np.nan)
+            if "_data" not in runtime:
+                runtime["_data"] = []
+            runtime["_data"].append(datum)
+        if runtime.get("_data"):
+            loader = DataLoader(runtime["_data"], batch_size=max(1, cfg.batch_size), shuffle=False, num_workers=0)
+            offset = 0
+            with torch.no_grad():
+                for batch in loader:
+                    out = runtime["model"](batch)
+                    out = out[0] if isinstance(out, tuple) else out
+                    arr = np.asarray(out.detach().cpu().numpy()).reshape(-1)
+                    for idx, value in enumerate(arr):
+                        preds[offset + idx] = float(value)
+                    offset += len(arr)
+        runtime["_data"] = []
+    elif runtime["runtime_mode"] == "graph_batch_with_environment":
+        deps = runtime["deps"]
+        Batch = deps["Batch"]
+        Chem = deps["Chem"]
+        for row in merged.itertuples(index=False):
+            mol = Chem.MolFromSmiles(str(row.standardized_smiles))
+            if mol is None:
+                failed_records.append({"screening_compound_id": row.screening_compound_id, "standardized_smiles": row.standardized_smiles, "failure_reason": "missing_graph_feature_metadata"})
+                continue
+            nodes = [[a.GetAtomicNum(), a.GetDegree(), a.GetFormalCharge(), int(a.GetIsAromatic()), a.GetTotalNumHs(), int(a.IsInRing()), a.GetImplicitValence(), a.GetMass() / 100.0] for a in mol.GetAtoms()]
+            if not nodes:
+                failed_records.append({"screening_compound_id": row.screening_compound_id, "standardized_smiles": row.standardized_smiles, "failure_reason": "missing_graph_feature_metadata"})
+                continue
+            edges, attrs = [], []
+            for b in mol.GetBonds():
+                bf = [float(b.GetBondType() == b.GetBondType().SINGLE), float(b.GetBondType() == b.GetBondType().DOUBLE), float(b.GetBondType() == b.GetBondType().TRIPLE), float(b.GetBondType() == b.GetBondType().AROMATIC), float(b.GetIsConjugated()), float(b.IsInRing())]
+                i, j = int(b.GetBeginAtomIdx()), int(b.GetEndAtomIdx())
+                edges.extend([[i, j], [j, i]])
+                attrs.extend([bf, bf])
+            graph = deps["Data"](
+                x=torch.tensor(nodes, dtype=torch.float32),
+                edge_index=torch.tensor(edges, dtype=torch.long).t().contiguous() if edges else torch.empty((2, 0), dtype=torch.long),
+                edge_attr=torch.tensor(attrs, dtype=torch.float32) if attrs else torch.empty((0, 6), dtype=torch.float32),
+            )
+            target_vocab = runtime["vocab"].get("target_vocab") or {}
+            family_vocab = runtime["vocab"].get("family_vocab") or {}
+            env_vocab = runtime["vocab"].get("environment_vocab") or {}
+            target_token = str(getattr(row, "target_chembl_id", "<UNK>"))
+            family_token = runtime["target_family_map"].get(target_token, "<UNK>")
+            env_token = str(getattr(row, runtime["environment_column"], "<UNK>"))
+            batch = {
+                "graph": Batch.from_data_list([graph]),
+                "label": torch.tensor([0.0], dtype=torch.float32),
+                "target_id": torch.tensor([target_vocab.get(target_token, target_vocab.get("<UNK>", 0))], dtype=torch.long),
+                "target_id_a": torch.tensor([target_vocab.get(target_token, target_vocab.get("<UNK>", 0))], dtype=torch.long),
+                "target_id_b": torch.tensor([target_vocab.get(target_token, target_vocab.get("<UNK>", 0))], dtype=torch.long),
+                "family_id": torch.tensor([family_vocab.get(family_token, family_vocab.get("<UNK>", 0))], dtype=torch.long),
+                "family_id_a": torch.tensor([family_vocab.get(family_token, family_vocab.get("<UNK>", 0))], dtype=torch.long),
+                "family_id_b": torch.tensor([family_vocab.get(family_token, family_vocab.get("<UNK>", 0))], dtype=torch.long),
+                "environment_id": torch.tensor([env_vocab.get(env_token, env_vocab.get("<UNK>", 0))], dtype=torch.long),
+                "activity_cliff_flag": torch.tensor([0], dtype=torch.long),
+            }
+            with torch.no_grad():
+                out = runtime["model"](batch)
+            preds.append(float(np.asarray(out["prediction"].detach().cpu().numpy()).reshape(-1)[0]))
+            kept_rows.append({"screening_compound_id": row.screening_compound_id, "standardized_smiles": row.standardized_smiles, "source_library_name": getattr(row, "source_library_name", ""), "target_chembl_id": getattr(row, "target_chembl_id", ""), "target_name": getattr(row, "target_name", "")})
+    else:
+        raise ValueError(f"Unsupported runtime mode: {runtime.get('runtime_mode')}")
+
+    failed_rows = pd.DataFrame(failed_records)
+    if not failed_rows.empty:
+        failed_rows["model_family"] = record.model_family
+        failed_rows["model_name"] = record.model_name
+        failed_rows["task_name"] = record.task_name
+    if not kept_rows:
+        return pd.DataFrame(), failed_rows, {"attempted": int(len(merged)), "scored": 0, "failed": int(len(failed_rows))}
+    output = pd.DataFrame(kept_rows)
     output["task_name"] = record.task_name
     output["model_family"] = record.model_family
     output["model_name"] = record.model_name
     output["model_artifact_path"] = str(record.artifact_path)
     output["split_strategy_used_to_select_model"] = record.split_strategy_used
-    output["predicted_value"] = predictions
+    output["predicted_value"] = np.asarray(preds, dtype=float)
     output["predicted_value_type"] = PREDICTED_VALUE_TYPES[record.task_name]
     output["score_type"] = output["predicted_value_type"]
     output["target_label"] = record.target_label
