@@ -1088,15 +1088,20 @@ def run_streaming_scoring(cfg: AppConfig, model_records: list[ModelRecord], conf
     def flush_path(path: Path) -> None:
         if not buffered_frames[path]:
             return
-        combined = pd.concat([frame for frame in buffered_frames[path] if not frame.empty], ignore_index=True) if buffered_frames[path] else pd.DataFrame()
+        non_empty_frames = [frame for frame in buffered_frames[path] if frame is not None and not frame.empty]
         buffered_frames[path] = []
-        if combined.empty:
+        if not non_empty_frames:
+            logging.info("Skipping flush for %s because buffered frames were all empty", path)
             return
+        combined = pd.concat(non_empty_frames, ignore_index=True)
         wrote_header[path] = append_dataframe(combined, path, wrote_header[path])
 
     def flush_all() -> None:
         for path in list(buffered_frames):
-            flush_path(path)
+            try:
+                flush_path(path)
+            except Exception:
+                logging.exception("Failed to flush buffered frames for %s", path)
 
     counters: dict[int, dict[str, int]] = {idx: {"attempted": 0, "scored": 0, "failed": 0, "chunks": 0} for idx in range(len(model_records))}
     family_scored_compounds: dict[str, set[str]] = {family: set() for family in SUPPORTED_MODEL_FAMILIES}
