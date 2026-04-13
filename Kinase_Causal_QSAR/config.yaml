@@ -817,6 +817,11 @@ script_13c:
   save_model_metadata_table: true
   save_failed_rows: true
   save_config_snapshot: true
+  chunk_size: 250000
+  write_every_n_chunks: 1
+  low_memory: true
+  overwrite_existing_outputs: true
+  allow_full_wide_pivot: false
 
   device: auto
   batch_size: 128
