@@ -9,6 +9,7 @@ import json
 import logging
 import pickle
 import sys
+import traceback
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -305,6 +306,20 @@ class ModelLoadFailure:
     record: ModelRecord
     reason: str
     artifact_diagnostic: str
+    reconstruction_stage: str = "unknown"
+    exception_type: str = "Exception"
+    traceback_summary: str = ""
+
+
+class ReconstructionError(RuntimeError):
+    def __init__(self, code: str, stage: str, *, context: str = "", cause: Exception | None = None):
+        message = code if not context else f"{code}::{context}"
+        super().__init__(message)
+        self.reconstruction_stage = stage
+        self.error_code = code
+        self.context = context
+        if cause is not None:
+            self.__cause__ = cause
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -777,17 +792,98 @@ def _read_nearest_config_yaml(path: Path) -> dict[str, Any]:
     raise RuntimeError("missing_config_yaml_for_reconstruction")
 
 
-def _infer_step08_dims_from_state_dict(state_dict: dict[str, Any], model_name: str) -> tuple[int, int]:
-    if model_name == "mpnn":
-        node_dim = int(state_dict["conv1.nn.0.weight"].shape[1])
-        edge_dim = int(state_dict["conv1.nn.0.weight"].shape[1])
-    else:
-        if model_name == "gin":
-            node_dim = int(state_dict["conv1.nn.0.weight"].shape[1])
+def _resolve_runtime_script_path(cfg: AppConfig, script_name: str) -> Path:
+    direct_candidates = [
+        cfg.project_root / "scripts" / script_name,
+        cfg.project_root / "Kinase_Causal_QSAR" / "scripts" / script_name,
+        cfg.project_root / script_name,
+    ]
+    for candidate in direct_candidates:
+        if candidate.exists():
+            logging.info("Resolved runtime helper script `%s` at %s", script_name, candidate)
+            return candidate
+
+    recursive_hits = sorted({path.resolve() for path in cfg.project_root.rglob(script_name)})
+    if recursive_hits:
+        logging.info("Resolved runtime helper script `%s` via recursive search at %s", script_name, recursive_hits[0])
+        return recursive_hits[0]
+    raise ReconstructionError("missing_runtime_script", "script import", context=script_name)
+
+
+def _summarize_traceback(exc: Exception, max_lines: int = 8) -> str:
+    tb = traceback.format_exception(type(exc), exc, exc.__traceback__)
+    if not tb:
+        return f"{type(exc).__name__}: {exc}"
+    merged = "".join(tb).strip().splitlines()
+    return " | ".join(merged[-max_lines:])
+
+
+def _infer_step08_architecture(model_name: str, state_dict: dict[str, Any]) -> str:
+    known = {"gin", "gcn", "gat", "mpnn"}
+    lowered_name = str(model_name).strip().lower()
+    if lowered_name in known:
+        return lowered_name
+    keys = set(state_dict)
+    if any(".att_src" in key or ".att_dst" in key for key in keys):
+        return "gat"
+    if any(".nn.0.weight" in key for key in keys):
+        if any("edge" in key.lower() for key in keys):
+            return "mpnn"
+        return "gin"
+    if any("edge_network" in key.lower() or "message_mlp" in key.lower() for key in keys):
+        return "mpnn"
+    if any(".lin.weight" in key for key in keys):
+        return "gcn"
+    raise ReconstructionError(
+        "step08_unmatched_checkpoint_architecture",
+        "model factory lookup",
+        context=f"model_name={model_name}; sample_keys={sorted(list(keys))[:12]}",
+    )
+
+
+def _infer_step08_dims_from_state_dict(state_dict: dict[str, Any], architecture: str) -> tuple[int, int]:
+    def _find_2d_weight(*patterns: str) -> Any:
+        for key, value in state_dict.items():
+            if not hasattr(value, "shape") or len(getattr(value, "shape", ())) != 2:
+                continue
+            key_lower = key.lower()
+            if any(pattern in key_lower for pattern in patterns):
+                return value
+        return None
+
+    node_tensor = _find_2d_weight("input_proj.weight", "node_encoder", "conv1.nn.0.weight", "conv1.lin.weight", "conv1.weight")
+    if node_tensor is None:
+        node_tensor = next(
+            (
+                value
+                for key, value in state_dict.items()
+                if hasattr(value, "shape") and len(getattr(value, "shape", ())) == 2 and "weight" in key.lower()
+            ),
+            None,
+        )
+    if node_tensor is None:
+        raise ReconstructionError("step08_missing_node_projection_weight", "checkpoint read")
+    node_dim = int(node_tensor.shape[1])
+
+    edge_dim = 0
+    if architecture == "mpnn":
+        edge_tensor = _find_2d_weight("edge", "bond", "message")
+        if edge_tensor is None:
+            edge_dim = node_dim
         else:
-            node_dim = int(state_dict["conv1.lin.weight"].shape[1] if "conv1.lin.weight" in state_dict else state_dict["conv1.weight"].shape[1])
-        edge_dim = 0
+            edge_dim = int(edge_tensor.shape[1])
     return node_dim, edge_dim
+
+
+def _extract_state_dict_from_checkpoint(payload: Any) -> tuple[dict[str, Any] | None, str]:
+    if hasattr(payload, "eval") and hasattr(payload, "forward"):
+        return None, "full_module"
+    if isinstance(payload, dict) and "model" in payload and hasattr(payload["model"], "eval"):
+        return None, "dict_with_model"
+    state_dict = _unwrap_state_dict(payload)
+    if state_dict is not None:
+        return state_dict, "raw_state_dict"
+    return None, "unknown"
 
 
 def _discover_vocabularies_json(path: Path) -> dict[str, Any] | None:
@@ -819,6 +915,64 @@ def _load_target_family_map(cfg: AppConfig) -> dict[str, str]:
     return mapping
 
 
+def _build_vocab_from_values(values: Iterable[Any]) -> dict[str, int]:
+    tokens = sorted({str(value).strip() for value in values if str(value).strip() and str(value).strip().lower() != "nan"})
+    return {token: idx for idx, token in enumerate(tokens)}
+
+
+def _reconstruct_step09_vocabularies(cfg: AppConfig, app09: Any) -> dict[str, dict[str, int]]:
+    vocab: dict[str, dict[str, int]] = {}
+    target_values: list[str] = []
+    family_values: list[str] = []
+    env_values: list[str] = []
+
+    task_tables = [
+        getattr(app09, "input_regression_long_path", None),
+        getattr(app09, "input_target_vs_panel_path", None),
+        getattr(app09, "input_pairwise_selectivity_path", None),
+    ]
+    for maybe_path in task_tables:
+        if maybe_path is None:
+            continue
+        table_path = Path(maybe_path)
+        if not table_path.exists():
+            continue
+        frame = pd.read_csv(table_path, low_memory=False)
+        for col in ("target_chembl_id", "kinase_a_chembl_id", "kinase_b_chembl_id"):
+            if col in frame.columns:
+                target_values.extend(frame[col].dropna().astype(str).tolist())
+        for col in ("kinase_family", "target_family", "kinase_family_label", "broad_kinase_family"):
+            if col in frame.columns:
+                family_values.extend(frame[col].dropna().astype(str).tolist())
+        for cols in getattr(app09, "environment_columns", {}).values():
+            for col in cols:
+                if col in frame.columns:
+                    env_values.extend(frame[col].dropna().astype(str).tolist())
+
+    annotated_path = cfg.project_root / "data/processed/chembl_human_kinase_panel_annotated_long.csv"
+    if annotated_path.exists():
+        annotated = pd.read_csv(annotated_path, low_memory=False)
+        for col in ("kinase_family", "target_family", "kinase_family_label", "broad_kinase_family"):
+            if col in annotated.columns:
+                family_values.extend(annotated[col].dropna().astype(str).tolist())
+        for cols in getattr(app09, "environment_columns", {}).values():
+            for col in cols:
+                if col in annotated.columns:
+                    env_values.extend(annotated[col].dropna().astype(str).tolist())
+
+    header = pd.read_csv(cfg.input_environment_feature_path, nrows=0).columns.tolist()
+    env_feature = pd.read_csv(cfg.input_environment_feature_path, low_memory=False)
+    for cols in getattr(app09, "environment_columns", {}).values():
+        for col in cols:
+            if col in header:
+                env_values.extend(env_feature[col].dropna().astype(str).tolist())
+
+    vocab["target_vocab"] = _build_vocab_from_values(target_values)
+    vocab["family_vocab"] = _build_vocab_from_values(family_values)
+    vocab["environment_vocab"] = _build_vocab_from_values(env_values)
+    return vocab
+
+
 def load_existing_classical_runtime(record: ModelRecord) -> dict[str, Any]:
     artifact = load_pickle_artifact(record.artifact_path)
     if not isinstance(artifact, dict) or "model" not in artifact:
@@ -830,21 +984,69 @@ def load_existing_classical_runtime(record: ModelRecord) -> dict[str, Any]:
 
 
 def load_existing_deep_runtime(record: ModelRecord, cfg: AppConfig) -> dict[str, Any]:
-    if record.artifact_path.name != "best_model.pt":
-        raise RuntimeError("missing_step08_best_model_checkpoint")
-    raw_cfg = _read_nearest_config_yaml(record.artifact_path)
-    script08_path = cfg.project_root / "scripts/08_train_graph_and_deep_baseline_models.py"
-    if not script08_path.exists():
-        script08_path = cfg.project_root / "Kinase_Causal_QSAR/scripts/08_train_graph_and_deep_baseline_models.py"
-    step08 = _load_script_module(script08_path, "step08_runtime")
-    app08 = step08.AppConfig.from_dict(raw_cfg, script08_path.parent.parent)
-    deps = step08.import_runtime_dependencies()
-    torch = deps["torch"]
-    payload = torch.load(record.artifact_path, map_location="cpu")
-    state_dict = _unwrap_state_dict(payload)
+    try:
+        raw_cfg = _read_nearest_config_yaml(record.artifact_path)
+    except Exception as exc:
+        raise ReconstructionError("missing_config_yaml_for_reconstruction", "config discovery", cause=exc) from exc
+    try:
+        script08_path = _resolve_runtime_script_path(cfg, "08_train_graph_and_deep_baseline_models.py")
+        step08 = _load_script_module(script08_path, "step08_runtime")
+    except Exception as exc:
+        if isinstance(exc, ReconstructionError):
+            raise
+        raise ReconstructionError("step08_script_import_failed", "script import", cause=exc) from exc
+    if not hasattr(step08, "import_runtime_dependencies"):
+        raise ReconstructionError("step08_missing_import_runtime_dependencies", "dependency import")
+    if not hasattr(step08, "make_model_factory"):
+        raise ReconstructionError("step08_missing_make_model_factory", "model factory lookup")
+    try:
+        app08 = step08.AppConfig.from_dict(raw_cfg, script08_path.parent.parent)
+    except Exception as exc:
+        raise ReconstructionError("step08_config_parse_failed", "config discovery", cause=exc) from exc
+    try:
+        deps = step08.import_runtime_dependencies()
+        torch = deps["torch"]
+    except Exception as exc:
+        raise ReconstructionError("step08_dependency_import_failed", "dependency import", cause=exc) from exc
+    try:
+        payload = torch.load(record.artifact_path, map_location="cpu")
+    except Exception as exc:
+        raise ReconstructionError("step08_checkpoint_read_failed", "checkpoint read", cause=exc) from exc
+    state_dict, checkpoint_structure = _extract_state_dict_from_checkpoint(payload)
+    if checkpoint_structure == "full_module":
+        model = payload
+        model.eval()
+        return {
+            "runtime_mode": "graph_batch",
+            "torch": torch,
+            "deps": deps,
+            "model": model,
+            "node_features": app08.node_features,
+            "edge_features": app08.edge_features,
+            "target_map": {},
+            "family_map": {},
+            "target_family_map": _load_target_family_map(cfg),
+            "metadata": {"reconstructed_from": "step08_full_module_checkpoint", "script_path": str(script08_path)},
+        }
+    if checkpoint_structure == "dict_with_model":
+        model = payload["model"]
+        model.eval()
+        return {
+            "runtime_mode": "graph_batch",
+            "torch": torch,
+            "deps": deps,
+            "model": model,
+            "node_features": app08.node_features,
+            "edge_features": app08.edge_features,
+            "target_map": {},
+            "family_map": {},
+            "target_family_map": _load_target_family_map(cfg),
+            "metadata": {"reconstructed_from": "step08_dict_with_model_checkpoint", "script_path": str(script08_path)},
+        }
     if state_dict is None:
-        raise RuntimeError("incompatible_checkpoint_keys_for_step08")
-    node_dim, edge_dim = _infer_step08_dims_from_state_dict(state_dict, record.model_name)
+        raise ReconstructionError("incompatible_checkpoint_keys_for_step08", "state_dict unwrap")
+    architecture = _infer_step08_architecture(record.model_name, state_dict)
+    node_dim, edge_dim = _infer_step08_dims_from_state_dict(state_dict, architecture)
     target_map: dict[str, int] = {}
     family_map: dict[str, int] = {}
     if app08.sequence_or_target_encoding.use_target_identity_embedding:
@@ -858,47 +1060,92 @@ def load_existing_deep_runtime(record: ModelRecord, cfg: AppConfig) -> dict[str,
     if app08.sequence_or_target_encoding.use_kinase_family_embedding:
         family_lookup = _load_target_family_map(cfg)
         family_map = {value: idx + 1 for idx, value in enumerate(sorted(set(family_lookup.values())))}
-    model_factory = step08.make_model_factory(
-        deps,
-        app08,
-        {
-            "task_name": record.task_name,
-            "output_mode": "regression",
-            "node_feature_dim": node_dim,
-            "edge_feature_dim": edge_dim,
-            "target_vocab_size": max(1, len(target_map)),
-            "family_vocab_size": max(1, len(family_map)),
-            "pair_vocab_size": max(1, len(target_map)),
-        },
-    )
+    try:
+        model_factory = step08.make_model_factory(
+            deps,
+            app08,
+            {
+                "task_name": record.task_name,
+                "output_mode": "regression",
+                "node_feature_dim": node_dim,
+                "edge_feature_dim": edge_dim,
+                "target_vocab_size": max(1, len(target_map)),
+                "family_vocab_size": max(1, len(family_map)),
+                "pair_vocab_size": max(1, len(target_map)),
+            },
+        )
+    except Exception as exc:
+        raise ReconstructionError("step08_make_model_factory_failed", "model factory lookup", cause=exc) from exc
     model_ctor = model_factory.get(record.model_name)
     if model_ctor is None:
-        raise RuntimeError(f"missing_model_class_information::{record.model_name}")
+        raise ReconstructionError("missing_model_class_information", "model factory lookup", context=record.model_name)
     model = model_ctor()
-    model.load_state_dict(state_dict, strict=True)
+    try:
+        model.load_state_dict(state_dict, strict=True)
+    except Exception as exc:
+        raise ReconstructionError("step08_strict_load_state_dict_failed", "strict load_state_dict", cause=exc) from exc
     model.eval()
-    return {"runtime_mode": "graph_batch", "torch": torch, "deps": deps, "model": model, "node_features": app08.node_features, "edge_features": app08.edge_features, "target_map": target_map, "family_map": family_map, "target_family_map": _load_target_family_map(cfg), "metadata": {"reconstructed_from": "step08_checkpoint"}}
+    return {
+        "runtime_mode": "graph_batch",
+        "torch": torch,
+        "deps": deps,
+        "model": model,
+        "node_features": app08.node_features,
+        "edge_features": app08.edge_features,
+        "target_map": target_map,
+        "family_map": family_map,
+        "target_family_map": _load_target_family_map(cfg),
+        "metadata": {
+            "reconstructed_from": "step08_checkpoint",
+            "checkpoint_structure": checkpoint_structure,
+            "architecture": architecture,
+            "script_path": str(script08_path),
+        },
+    }
 
 
 def load_existing_causal_runtime(record: ModelRecord, cfg: AppConfig) -> dict[str, Any]:
-    if record.artifact_path.name != "model_state_dict.pt":
-        raise RuntimeError("missing_step09_model_state_dict")
-    vocab = _discover_vocabularies_json(record.artifact_path)
-    if not vocab:
-        raise RuntimeError("missing_target_or_environment_vocabulary")
-    raw_cfg = _read_nearest_config_yaml(record.artifact_path)
-    script09_path = cfg.project_root / "scripts/09_train_causal_environment_aware_model.py"
-    if not script09_path.exists():
-        script09_path = cfg.project_root / "Kinase_Causal_QSAR/scripts/09_train_causal_environment_aware_model.py"
-    step09 = _load_script_module(script09_path, "step09_runtime")
-    app09 = step09.AppConfig.from_dict(raw_cfg, script09_path.parent.parent)
-    deps = step09.import_training_dependencies()
-    torch = deps["torch"]
-    state_dict = _unwrap_state_dict(torch.load(record.artifact_path, map_location="cpu"))
+    try:
+        raw_cfg = _read_nearest_config_yaml(record.artifact_path)
+    except Exception as exc:
+        raise ReconstructionError("missing_config_yaml_for_reconstruction", "config discovery", cause=exc) from exc
+    try:
+        script09_path = _resolve_runtime_script_path(cfg, "09_train_causal_environment_aware_model.py")
+        step09 = _load_script_module(script09_path, "step09_runtime")
+        app09 = step09.AppConfig.from_dict(raw_cfg, script09_path.parent.parent)
+    except Exception as exc:
+        if isinstance(exc, ReconstructionError):
+            raise
+        raise ReconstructionError("step09_script_import_failed", "script import", cause=exc) from exc
+    if not hasattr(step09, "import_training_dependencies"):
+        raise ReconstructionError("step09_missing_import_training_dependencies", "dependency import")
+    if not hasattr(step09, "make_model_class"):
+        raise ReconstructionError("step09_missing_make_model_class", "model factory lookup")
+    try:
+        deps = step09.import_training_dependencies()
+        torch = deps["torch"]
+    except Exception as exc:
+        raise ReconstructionError("step09_dependency_import_failed", "dependency import", cause=exc) from exc
+    try:
+        payload = torch.load(record.artifact_path, map_location="cpu")
+    except Exception as exc:
+        raise ReconstructionError("step09_checkpoint_read_failed", "checkpoint read", cause=exc) from exc
+    state_dict = _unwrap_state_dict(payload)
     if state_dict is None:
-        raise RuntimeError("incompatible_checkpoint_keys")
-    ModelClass = step09.make_model_class(deps)
+        raise ReconstructionError("incompatible_checkpoint_keys", "state_dict unwrap")
+    try:
+        ModelClass = step09.make_model_class(deps)
+    except Exception as exc:
+        raise ReconstructionError("step09_make_model_class_failed", "model factory lookup", cause=exc) from exc
     sample_in_dim = int(state_dict["encoder.input_proj.weight"].shape[1]) if "encoder.input_proj.weight" in state_dict else 8
+    vocab = _discover_vocabularies_json(record.artifact_path) or {}
+    if not vocab.get("target_vocab") or not vocab.get("family_vocab") or not vocab.get("environment_vocab"):
+        reconstructed = _reconstruct_step09_vocabularies(cfg, app09)
+        for key in ("target_vocab", "family_vocab", "environment_vocab"):
+            if not vocab.get(key):
+                vocab[key] = reconstructed.get(key, {})
+    if not vocab.get("target_vocab") or not vocab.get("environment_vocab"):
+        raise ReconstructionError("missing_target_or_environment_vocabulary", "vocab discovery")
     env_vocab = vocab.get("environment_vocab") or {}
     model = ModelClass(
         in_dim=sample_in_dim,
@@ -910,29 +1157,54 @@ def load_existing_causal_runtime(record: ModelRecord, cfg: AppConfig) -> dict[st
         task_type="regression",
         grl_lambda=app09.loss_weights.get("environment_adversarial_loss", 0.0),
     )
-    model.load_state_dict(state_dict, strict=True)
+    try:
+        model.load_state_dict(state_dict, strict=True)
+    except Exception as exc:
+        raise ReconstructionError("step09_strict_load_state_dict_failed", "strict load_state_dict", cause=exc) from exc
     model.eval()
     resolved_env_column = None
+    try:
+        env_header = pd.read_csv(cfg.input_environment_feature_path, nrows=0).columns
+    except Exception as exc:
+        raise ReconstructionError("environment_feature_header_read_failed", "environment column discovery", cause=exc) from exc
     for candidates in app09.environment_columns.values():
         for col in candidates:
-            if col in pd.read_csv(cfg.input_environment_feature_path, nrows=0).columns:
+            if col in env_header:
                 resolved_env_column = col
                 break
         if resolved_env_column:
             break
     if not resolved_env_column:
-        raise RuntimeError("missing_environment_vocabulary_or_columns")
-    return {"runtime_mode": "graph_batch_with_environment", "torch": torch, "deps": deps, "model": model, "vocab": vocab, "environment_column": resolved_env_column, "target_family_map": _load_target_family_map(cfg), "metadata": {"reconstructed_from": "step09_checkpoint"}}
+        candidate_cols = list(getattr(app09, "environment_columns", {}).keys())
+        if candidate_cols:
+            resolved_env_column = candidate_cols[0]
+        else:
+            raise ReconstructionError("missing_environment_vocabulary_or_columns", "environment column discovery")
+    return {
+        "runtime_mode": "graph_batch_with_environment",
+        "torch": torch,
+        "deps": deps,
+        "model": model,
+        "vocab": vocab,
+        "environment_column": resolved_env_column,
+        "target_family_map": _load_target_family_map(cfg),
+        "metadata": {"reconstructed_from": "step09_checkpoint", "script_path": str(script09_path)},
+    }
 
 
 def prepare_model_runtime(record: ModelRecord, cfg: AppConfig) -> dict[str, Any]:
-    if record.model_family == "classical":
-        return load_existing_classical_runtime(record)
-    if record.model_family == "deep":
-        return load_existing_deep_runtime(record, cfg=cfg)
-    if record.model_family == "causal":
-        return load_existing_causal_runtime(record, cfg=cfg)
-    raise ValueError(f"Unsupported model family: {record.model_family}")
+    try:
+        if record.model_family == "classical":
+            return load_existing_classical_runtime(record)
+        if record.model_family == "deep":
+            return load_existing_deep_runtime(record, cfg=cfg)
+        if record.model_family == "causal":
+            return load_existing_causal_runtime(record, cfg=cfg)
+        raise ValueError(f"Unsupported model family: {record.model_family}")
+    except ReconstructionError:
+        raise
+    except Exception as exc:
+        raise ReconstructionError("model_runtime_assembly_failed", "graph runtime assembly", cause=exc) from exc
 
 
 def preflight_validate_model_runtimes(cfg: AppConfig, model_records: list[ModelRecord]) -> tuple[list[ModelRecord], dict[int, dict[str, Any]], list[ModelLoadFailure]]:
@@ -951,6 +1223,9 @@ def preflight_validate_model_runtimes(cfg: AppConfig, model_records: list[ModelR
             runtimes[len(loadable_records) - 1] = runtime
         except Exception as exc:
             reason = str(exc)
+            stage = getattr(exc, "reconstruction_stage", "unknown")
+            exception_type = type(exc).__name__
+            tb_summary = _summarize_traceback(exc)
             artifact_kind = "unknown"
             if "direct module" in reason:
                 artifact_kind = "direct_module"
@@ -966,7 +1241,16 @@ def preflight_validate_model_runtimes(cfg: AppConfig, model_records: list[ModelR
                 artifact_kind = "unsupported_inference_mode"
             elif "not_explicitly_supported" in reason or "not_screening_ready" in reason:
                 artifact_kind = "not_screening_ready_for_screening"
-            skipped.append(ModelLoadFailure(record=record, reason=reason, artifact_diagnostic=artifact_kind))
+            skipped.append(
+                ModelLoadFailure(
+                    record=record,
+                    reason=reason,
+                    artifact_diagnostic=artifact_kind,
+                    reconstruction_stage=stage,
+                    exception_type=exception_type,
+                    traceback_summary=tb_summary,
+                )
+            )
 
     logging.info(
         "Preflight model validation complete. loadable=%s skipped=%s total=%s",
@@ -976,15 +1260,28 @@ def preflight_validate_model_runtimes(cfg: AppConfig, model_records: list[ModelR
     )
     for failure in skipped:
         logging.warning(
-            "Skipping model for screening safety: family=%s model=%s task=%s checkpoint_exists=true "
-            "valid_screening_inference_artifact=false diagnostic=%s reason=%s artifact=%s",
+            "Skipping model for screening safety: family=%s model=%s task=%s artifact=%s "
+            "checkpoint_exists=true valid_screening_inference_artifact=false diagnostic=%s "
+            "reconstruction_stage=%s exception_type=%s reason=%s traceback_summary=%s",
             failure.record.model_family,
             failure.record.model_name,
             failure.record.task_name,
-            failure.artifact_diagnostic,
-            failure.reason,
             failure.record.artifact_path,
+            failure.artifact_diagnostic,
+            failure.reconstruction_stage,
+            failure.exception_type,
+            failure.reason,
+            failure.traceback_summary,
         )
+
+    requested_families = set(cfg.selected_families_to_score)
+    loadable_families = {record.model_family for record in loadable_records}
+    for family in ("deep", "causal"):
+        if family in requested_families and family not in loadable_families:
+            logging.warning(
+                "Configured family %s was requested for screening but no model could be reconstructed from saved artifacts.",
+                family,
+            )
     try:
         import sklearn  # type: ignore
 
@@ -1426,7 +1723,10 @@ def run_streaming_scoring(cfg: AppConfig, model_records: list[ModelRecord], conf
                     "number_of_compounds_scored_successfully": 0,
                     "number_of_failed_rows": 0,
                     "number_of_processed_chunks": 0,
-                    "notes": f"SKIPPED_UNLOADABLE_MODEL::{entry.artifact_diagnostic}::{entry.reason}",
+                    "notes": (
+                        f"SKIPPED_UNLOADABLE_MODEL::{entry.artifact_diagnostic}::{entry.reconstruction_stage}"
+                        f"::{entry.exception_type}::{entry.reason}"
+                    ),
                 }
                 for entry in skipped_models
             ]
@@ -1452,7 +1752,10 @@ def run_streaming_scoring(cfg: AppConfig, model_records: list[ModelRecord], conf
                     "target_chembl_id": entry.record.target_chembl_id,
                     "ablation_name": entry.record.ablation_name,
                     "supporting_rank": entry.record.supporting_rank,
-                    "notes": f"SKIPPED_UNLOADABLE_MODEL::{entry.artifact_diagnostic}::{entry.reason}",
+                    "notes": (
+                        f"SKIPPED_UNLOADABLE_MODEL::{entry.artifact_diagnostic}::{entry.reconstruction_stage}"
+                        f"::{entry.exception_type}::{entry.reason}"
+                    ),
                 }
                 for entry in skipped_models
             ]
@@ -1505,6 +1808,9 @@ def run_streaming_scoring(cfg: AppConfig, model_records: list[ModelRecord], conf
                     "task_name": entry.record.task_name,
                     "artifact_path": str(entry.record.artifact_path),
                     "artifact_diagnostic": entry.artifact_diagnostic,
+                    "reconstruction_stage": entry.reconstruction_stage,
+                    "exception_type": entry.exception_type,
+                    "traceback_summary": entry.traceback_summary,
                     "reason": entry.reason,
                 }
                 for entry in skipped_models
