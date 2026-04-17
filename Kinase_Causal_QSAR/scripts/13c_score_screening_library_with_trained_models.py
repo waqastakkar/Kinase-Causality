@@ -10,6 +10,7 @@ import logging
 import pickle
 import sys
 import traceback
+import types
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -781,7 +782,35 @@ def _load_script_module(script_path: Path, module_tag: str) -> Any:
     if spec is None or spec.loader is None:
         raise RuntimeError(f"Unable to load module from {script_path}")
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    missing_optional_modules: dict[str, types.ModuleType] = {}
+    previous_modules: dict[str, Any] = {}
+    for optional_name in ("numpy", "pandas", "yaml"):
+        if optional_name in sys.modules:
+            continue
+        if importlib.util.find_spec(optional_name) is not None:
+            continue
+        stub = types.ModuleType(optional_name)
+
+        def _missing_attr(name: str, dependency: str = optional_name) -> Any:
+            raise RuntimeError(
+                f"Optional dependency `{dependency}` is required to access `{dependency}.{name}` "
+                f"while reconstructing runtime from {script_path}."
+            )
+
+        setattr(stub, "__getattr__", _missing_attr)
+        missing_optional_modules[optional_name] = stub
+    try:
+        for name, stub in missing_optional_modules.items():
+            previous_modules[name] = sys.modules.get(name)
+            sys.modules[name] = stub
+        spec.loader.exec_module(module)
+    finally:
+        for name in missing_optional_modules:
+            previous = previous_modules.get(name)
+            if previous is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = previous
     return module
 
 
